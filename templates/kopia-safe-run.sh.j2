@@ -1,0 +1,137 @@
+#!/bin/bash
+set -u
+set -o pipefail
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+ENV_FILE="{{ env_file }}"
+LOG_FILE="{{ log_file }}"
+BACKUP_SOURCE="{{ backup_source }}"
+DEFAULT_KOPIA_PASSWORD_REF="{{ kopia_password_ref }}"
+DENY_SSIDS=(
+{% for ssid in deny_ssids %}
+  "{{ ssid }}"
+{% endfor %}
+)
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_FILE"
+}
+
+source_env() {
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+}
+
+wifi_device() {
+  networksetup -listallhardwareports | awk '
+    /^Hardware Port: Wi-Fi$/ { wifi = 1; next }
+    /^Hardware Port:/ { wifi = 0 }
+    wifi && /^Device:/ { print $2; exit }
+  '
+}
+
+current_ssid() {
+  local device="$1"
+  local output
+
+  output="$(networksetup -getairportnetwork "$device" 2>/dev/null || true)"
+  case "$output" in
+    "Current Wi-Fi Network: "*)
+      printf '%s\n' "${output#Current Wi-Fi Network: }"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ssid_denied() {
+  local ssid="$1"
+  local denied
+
+  for denied in "${DENY_SSIDS[@]}"; do
+    if [[ "$ssid" == "$denied" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+load_kopia_password() {
+  local password_ref="${KOPIA_PASSWORD_REF:-$DEFAULT_KOPIA_PASSWORD_REF}"
+
+  if [[ -n "${KOPIA_PASSWORD:-}" ]]; then
+    export KOPIA_PASSWORD
+    return 0
+  fi
+
+  if [[ -z "$password_ref" ]]; then
+    log "failure: KOPIA_PASSWORD_REF is empty"
+    return 1
+  fi
+
+  if ! command -v op >/dev/null 2>&1; then
+    log "failure: 1Password CLI 'op' is not installed or not on PATH"
+    return 1
+  fi
+
+  if ! KOPIA_PASSWORD="$(op read "$password_ref" 2>> "$LOG_FILE")"; then
+    log "failure: unable to read KOPIA_PASSWORD from 1Password reference '$password_ref'"
+    return 1
+  fi
+
+  export KOPIA_PASSWORD
+}
+
+main() {
+  local device
+  local ssid
+
+  log "kopia backup starting"
+  source_env
+
+  device="$(wifi_device)"
+  if [[ -z "$device" ]]; then
+    log "skip: no Wi-Fi device found"
+    log "kopia backup finished"
+    exit 0
+  fi
+
+  if ! ssid="$(current_ssid "$device")" || [[ -z "$ssid" ]]; then
+    log "skip: no SSID detected on $device"
+    log "kopia backup finished"
+    exit 0
+  fi
+
+  if ssid_denied "$ssid"; then
+    log "skip: SSID '$ssid' is denied"
+    log "kopia backup finished"
+    exit 0
+  fi
+
+  if ! load_kopia_password; then
+    log "kopia backup finished"
+    exit 1
+  fi
+
+  log "running: kopia snapshot create $BACKUP_SOURCE on SSID '$ssid'"
+  if kopia snapshot create "$BACKUP_SOURCE" >> "$LOG_FILE" 2>&1; then
+    log "success: kopia snapshot complete"
+  else
+    local status=$?
+    log "failure: kopia snapshot exited with status $status"
+    log "kopia backup finished"
+    exit "$status"
+  fi
+
+  log "kopia backup finished"
+}
+
+main "$@"
