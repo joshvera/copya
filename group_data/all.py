@@ -12,6 +12,7 @@ legacy_backup_launchd_label = "com.vera.kopia.backup"
 monitor_launchd_label = "com.vera.kopia.monitor"
 run_interval_seconds = 21600
 network_check_interval_seconds = 60
+preflight_failure_retry_seconds = 300
 
 runner_dir = "/Users/vera/.local/kopia-backup"
 log_file = "/Users/vera/Library/Logs/kopia-backup.log"

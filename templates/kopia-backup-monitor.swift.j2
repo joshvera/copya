@@ -17,6 +17,7 @@ enum Config {
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
     static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
+    static let preflightFailureRetrySeconds = {{ preflight_failure_retry_seconds }}
     static let denySSIDs = Set<String>([
 {% for ssid in deny_ssids %}
         "{{ ssid }}",
@@ -55,12 +56,44 @@ struct ConfigSummary: Codable {
     var backup_source: String
     var run_interval_seconds: Int
     var network_check_interval_seconds: Int
+    var preflight_failure_retry_seconds: Int
     var deny_ssids: [String]
     var password_ref_configured: Bool
     var app_bundle_identifier: String
     var monitor_launchd_label: String
     var log_file: String
     var status_file: String
+}
+
+extension ConfigSummary {
+    enum CodingKeys: String, CodingKey {
+        case app_name
+        case backup_source
+        case run_interval_seconds
+        case network_check_interval_seconds
+        case preflight_failure_retry_seconds
+        case deny_ssids
+        case password_ref_configured
+        case app_bundle_identifier
+        case monitor_launchd_label
+        case log_file
+        case status_file
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        app_name = try container.decodeIfPresent(String.self, forKey: .app_name) ?? Config.appName
+        backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
+        run_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .run_interval_seconds) ?? Config.runIntervalSeconds
+        network_check_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .network_check_interval_seconds) ?? Config.networkCheckIntervalSeconds
+        preflight_failure_retry_seconds = try container.decodeIfPresent(Int.self, forKey: .preflight_failure_retry_seconds) ?? Config.preflightFailureRetrySeconds
+        deny_ssids = try container.decodeIfPresent([String].self, forKey: .deny_ssids) ?? Array(Config.denySSIDs).sorted()
+        password_ref_configured = try container.decodeIfPresent(Bool.self, forKey: .password_ref_configured) ?? !Config.kopiaPasswordRef.isEmpty
+        app_bundle_identifier = try container.decodeIfPresent(String.self, forKey: .app_bundle_identifier) ?? Config.bundleIdentifier
+        monitor_launchd_label = try container.decodeIfPresent(String.self, forKey: .monitor_launchd_label) ?? Config.monitorLaunchdLabel
+        log_file = try container.decodeIfPresent(String.self, forKey: .log_file) ?? Config.logFile
+        status_file = try container.decodeIfPresent(String.self, forKey: .status_file) ?? Config.statusFile
+    }
 }
 
 struct NetworkSnapshot: Codable {
@@ -340,13 +373,20 @@ enum CommandRunner {
         return nil
     }
 
-    static func run(_ executable: String, arguments: [String]) throws -> CommandResult {
+    static func run(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws -> CommandResult {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
 
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
         process.standardOutput = stdout
         process.standardError = stderr
 
@@ -456,7 +496,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
-        refreshNetwork(reason: "start-\(trigger)", shouldEvaluateSchedule: false)
+        network = NetworkPolicy.current(isExpensive: pathIsExpensive, isConstrained: pathIsConstrained)
         guard network.allowed else {
             appendLog("start blocked: network_state=\(network.state) reason='\(network.reason)'")
             updateDerivedState()
@@ -465,41 +505,47 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         guard let opPath = CommandRunner.findExecutable("op") else {
-            recordFailure("1Password CLI 'op' is not installed or not on PATH")
+            recordPreflightFailure("1Password CLI 'op' is not installed or not on PATH")
             return
         }
 
         guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
-            recordFailure("Kopia is not installed or not on PATH")
+            recordPreflightFailure("Kopia is not installed or not on PATH")
             return
         }
 
         let password: String
         do {
-            let result = try CommandRunner.run(opPath, arguments: ["read", Config.kopiaPasswordRef])
+            let result = try CommandRunner.run(
+                opPath,
+                arguments: ["read", Config.kopiaPasswordRef],
+                environment: childEnvironment()
+            )
             guard result.status == 0 else {
-                recordFailure("Unable to read Kopia password from 1Password reference")
-                if !result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    appendLog("op read failed: \(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+                let detail = sanitizedCommandError(result.stderr)
+                if detail.isEmpty {
+                    recordPreflightFailure("Unable to read Kopia password from 1Password reference")
+                } else {
+                    recordPreflightFailure("Unable to read Kopia password from 1Password reference: \(detail)")
+                    appendLog("op read failed: \(detail)")
                 }
                 return
             }
             password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            recordFailure("Unable to run 1Password CLI: \(error.localizedDescription)")
+            recordPreflightFailure("Unable to run 1Password CLI: \(error.localizedDescription)")
             return
         }
 
         guard !password.isEmpty else {
-            recordFailure("1Password returned an empty Kopia password")
+            recordPreflightFailure("1Password returned an empty Kopia password")
             return
         }
 
         let process = Process()
         let pipe = Pipe()
-        var environment = ProcessInfo.processInfo.environment
+        var environment = childEnvironment()
         environment["KOPIA_PASSWORD"] = password
-        environment["PATH"] = Config.executableSearchPath.joined(separator: ":")
 
         process.executableURL = URL(fileURLWithPath: kopiaPath)
         process.arguments = ["snapshot", "create", "--no-progress", Config.backupSource]
@@ -525,7 +571,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             try process.run()
         } catch {
             pipe.fileHandleForReading.readabilityHandler = nil
-            recordFailure("Unable to start Kopia: \(error.localizedDescription)")
+            recordPreflightFailure("Unable to start Kopia: \(error.localizedDescription)")
             return
         }
 
@@ -656,7 +702,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private func tick() {
         refreshNetwork(reason: "timer", shouldEvaluateSchedule: true)
 
-        if activeProcess != nil {
+        if let process = activeProcess {
+            if !process.isRunning {
+                handleBackupExit(status: process.terminationStatus)
+                return
+            }
+
             let elapsed = Date().timeIntervalSince(lastNetworkCheckAt)
             if elapsed >= TimeInterval(Config.networkCheckIntervalSeconds) {
                 lastNetworkCheckAt = Date()
@@ -710,6 +761,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func handleBackupExit(status: Int32) {
+        appendLog("kopia backup exit observed status=\(status)")
         activePipe?.fileHandleForReading.readabilityHandler = nil
         activePipe = nil
         activeProcess = nil
@@ -744,6 +796,34 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         appendLog("failure: \(message)")
         updateDerivedState()
         writeStatus()
+    }
+
+    private func recordPreflightFailure(_ message: String) {
+        lastFailureAt = Date()
+        lastFailure = message
+        nextRunAt = Date().addingTimeInterval(TimeInterval(Config.preflightFailureRetrySeconds))
+        appendLog("failure: \(message); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func childEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = Config.executableSearchPath.joined(separator: ":")
+        environment["HOME"] = "{{ home }}"
+        environment["USER"] = "{{ config_user }}"
+        environment["LOGNAME"] = "{{ config_user }}"
+        environment["OP_BIOMETRIC_UNLOCK_ENABLED"] = "true"
+        return environment
+    }
+
+    private func sanitizedCommandError(_ stderr: String) -> String {
+        stderr
+            .replacingOccurrences(of: Config.kopiaPasswordRef, with: "<1password-ref>")
+            .split(separator: "\n")
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private func updateDerivedState() {
@@ -819,6 +899,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             backup_source: Config.backupSource,
             run_interval_seconds: Config.runIntervalSeconds,
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+            preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
             deny_ssids: Array(Config.denySSIDs).sorted(),
             password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
             app_bundle_identifier: Config.bundleIdentifier,
@@ -1046,6 +1127,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 backup_source: Config.backupSource,
                 run_interval_seconds: Config.runIntervalSeconds,
                 network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+                preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
                 deny_ssids: Array(Config.denySSIDs).sorted(),
                 password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
                 app_bundle_identifier: Config.bundleIdentifier,
@@ -1126,6 +1208,7 @@ func printStatusJSONAndExit() -> Never {
             backup_source: Config.backupSource,
             run_interval_seconds: Config.runIntervalSeconds,
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+            preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
             deny_ssids: Array(Config.denySSIDs).sorted(),
             password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
             app_bundle_identifier: Config.bundleIdentifier,

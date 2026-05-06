@@ -23,6 +23,7 @@ legacy_backup_launchd_label = data("legacy_backup_launchd_label")
 monitor_launchd_label = data("monitor_launchd_label")
 run_interval_seconds = data("run_interval_seconds")
 network_check_interval_seconds = data("network_check_interval_seconds")
+preflight_failure_retry_seconds = data("preflight_failure_retry_seconds")
 runner_dir = data("runner_dir")
 log_file = data("log_file")
 status_file = data("status_file")
@@ -76,9 +77,11 @@ template_context = {
     "log_file": log_file,
     "monitor_launchd_label": monitor_launchd_label,
     "network_check_interval_seconds": network_check_interval_seconds,
+    "preflight_failure_retry_seconds": preflight_failure_retry_seconds,
     "run_interval_seconds": run_interval_seconds,
     "runner_dir": runner_dir,
     "status_file": status_file,
+    "config_user": user,
 }
 
 

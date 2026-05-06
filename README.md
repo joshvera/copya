@@ -150,6 +150,8 @@ Scheduling rules:
 
 - if no backup has ever completed and the network becomes allowed, start one
   immediately;
+- if a preflight step such as reading the 1Password secret fails, retry that
+  preflight after `preflight_failure_retry_seconds`;
 - after a successful backup, schedule the next run at
   `last_success_at + run_interval_seconds`;
 - if a scheduled run arrives while the network is denied or degraded, skip
