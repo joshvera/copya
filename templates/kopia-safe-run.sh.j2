@@ -9,11 +9,14 @@ ENV_FILE="{{ env_file }}"
 LOG_FILE="{{ log_file }}"
 BACKUP_SOURCE="{{ backup_source }}"
 DEFAULT_KOPIA_PASSWORD_REF="{{ kopia_password_ref }}"
+NETWORK_CHECK_INTERVAL_SECONDS="{{ network_check_interval_seconds }}"
+SSID_HELPER="{{ ssid_helper_path }}"
 DENY_SSIDS=(
 {% for ssid in deny_ssids %}
   "{{ ssid }}"
 {% endfor %}
 )
+KOPIA_PID=""
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_FILE"
@@ -25,6 +28,13 @@ source_env() {
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+  fi
+}
+
+validate_interval() {
+  if ! [[ "$NETWORK_CHECK_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || (( NETWORK_CHECK_INTERVAL_SECONDS < 1 )); then
+    log "failure: NETWORK_CHECK_INTERVAL_SECONDS must be a positive integer"
+    exit 1
   fi
 }
 
@@ -40,6 +50,20 @@ current_ssid() {
   local device="$1"
   local output
 
+  if [[ -x "$SSID_HELPER" ]]; then
+    output="$("$SSID_HELPER" --ssid "$device" 2>/dev/null || true)"
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    output="$("$SSID_HELPER" --ssid-request "$device" 2>/dev/null || true)"
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+  fi
+
   output="$(networksetup -getairportnetwork "$device" 2>/dev/null || true)"
   case "$output" in
     "Current Wi-Fi Network: "*)
@@ -49,6 +73,22 @@ current_ssid() {
   esac
 
   ipconfig getsummary "$device" 2>/dev/null | sed -n 's/^[[:space:]]*SSID[[:space:]]*: //p' | head -n 1
+}
+
+trim() {
+  sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+ssid_redacted() {
+  local ssid="$1"
+
+  case "$ssid" in
+    "<redacted>"|"redacted"|"Wi-Fi"|"WLAN")
+      return 0
+      ;;
+  esac
+
+  return 1
 }
 
 ssid_denied() {
@@ -62,6 +102,92 @@ ssid_denied() {
   done
 
   return 1
+}
+
+network_info() {
+  local device
+  local ssid
+
+  device="$(wifi_device)"
+  if [[ -z "$device" ]]; then
+    printf 'missing\t\t\tno Wi-Fi device found\n'
+    return 0
+  fi
+
+  ssid="$(current_ssid "$device" | trim)"
+  if [[ -z "$ssid" ]]; then
+    printf 'missing\t%s\t\tno SSID detected\n' "$device"
+    return 0
+  fi
+
+  if ssid_redacted "$ssid"; then
+    printf 'redacted\t%s\t%s\tSSID redacted by macOS privacy controls\n' "$device" "$ssid"
+    return 0
+  fi
+
+  if ssid_denied "$ssid"; then
+    printf 'denied\t%s\t%s\tSSID is denied\n' "$device" "$ssid"
+    return 0
+  fi
+
+  printf 'allowed\t%s\t%s\tSSID is allowed\n' "$device" "$ssid"
+}
+
+read_network_info() {
+  IFS=$'\t' read -r NETWORK_STATE NETWORK_DEVICE NETWORK_SSID NETWORK_REASON < <(network_info)
+}
+
+network_summary() {
+  local summary
+
+  summary="state=${NETWORK_STATE:-unknown}"
+  if [[ -n "${NETWORK_DEVICE:-}" ]]; then
+    summary="$summary device=$NETWORK_DEVICE"
+  fi
+  if [[ -n "${NETWORK_SSID:-}" ]]; then
+    summary="$summary ssid='$NETWORK_SSID'"
+  fi
+  if [[ -n "${NETWORK_REASON:-}" ]]; then
+    summary="$summary reason='$NETWORK_REASON'"
+  fi
+
+  printf '%s\n' "$summary"
+}
+
+backup_allowed() {
+  read_network_info
+
+  case "$NETWORK_STATE" in
+    allowed)
+      log "network allowed: $(network_summary)"
+      return 0
+      ;;
+    denied)
+      log "skip: $(network_summary)"
+      return 1
+      ;;
+    missing)
+      log "skip: $(network_summary)"
+      return 1
+      ;;
+    redacted)
+      log "skip: $(network_summary); fix macOS SSID visibility before unattended backups"
+      return 1
+      ;;
+    *)
+      log "skip: unknown network state '$NETWORK_STATE'"
+      return 1
+      ;;
+  esac
+}
+
+check_network() {
+  read_network_info
+  local summary
+
+  summary="network check: $(network_summary)"
+  log "$summary"
+  printf '%s\n' "$summary"
 }
 
 load_kopia_password() {
@@ -90,43 +216,100 @@ load_kopia_password() {
   export KOPIA_PASSWORD
 }
 
+terminate_kopia() {
+  local pid="$1"
+  local attempt
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "abort: kopia pid $pid did not stop after TERM; sending KILL"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+cleanup_child() {
+  if [[ -n "${KOPIA_PID:-}" ]] && kill -0 "$KOPIA_PID" 2>/dev/null; then
+    log "termination requested: stopping kopia pid $KOPIA_PID"
+    terminate_kopia "$KOPIA_PID"
+  fi
+}
+
+run_kopia_with_network_monitor() {
+  local status
+
+  log "running: kopia snapshot create --no-progress $BACKUP_SOURCE"
+  kopia snapshot create --no-progress "$BACKUP_SOURCE" >> "$LOG_FILE" 2>&1 &
+  KOPIA_PID=$!
+  log "kopia child started: pid=$KOPIA_PID network_check_interval_seconds=$NETWORK_CHECK_INTERVAL_SECONDS"
+
+  while kill -0 "$KOPIA_PID" 2>/dev/null; do
+    sleep "$NETWORK_CHECK_INTERVAL_SECONDS"
+
+    if ! kill -0 "$KOPIA_PID" 2>/dev/null; then
+      break
+    fi
+
+    read_network_info
+    if [[ "$NETWORK_STATE" != "allowed" ]]; then
+      log "abort: network no longer allowed: $(network_summary); stopping kopia pid $KOPIA_PID"
+      terminate_kopia "$KOPIA_PID"
+      KOPIA_PID=""
+      return 0
+    fi
+  done
+
+  wait "$KOPIA_PID"
+  status=$?
+  KOPIA_PID=""
+
+  if [[ "$status" -eq 0 ]]; then
+    log "success: kopia snapshot complete"
+    return 0
+  fi
+
+  log "failure: kopia snapshot exited with status $status"
+  return "$status"
+}
+
 main() {
-  local device
-  local ssid
+  local status
 
   log "kopia backup starting"
   source_env
+  validate_interval
 
-  device="$(wifi_device)"
-  if [[ -z "$device" ]]; then
-    log "skip: no Wi-Fi device found"
+  if [[ "${1:-}" == "--check-network" ]]; then
+    check_network
     log "kopia backup finished"
     exit 0
   fi
 
-  if ! ssid="$(current_ssid "$device")" || [[ -z "$ssid" ]]; then
-    log "skip: no SSID detected on $device"
+  if ! backup_allowed; then
     log "kopia backup finished"
     exit 0
   fi
 
-  if ssid_denied "$ssid"; then
-    log "skip: SSID '$ssid' is denied"
-    log "kopia backup finished"
-    exit 0
-  fi
+  trap 'cleanup_child; exit 143' INT TERM
 
   if ! load_kopia_password; then
     log "kopia backup finished"
     exit 1
   fi
 
-  log "running: kopia snapshot create $BACKUP_SOURCE on SSID '$ssid'"
-  if kopia snapshot create "$BACKUP_SOURCE" >> "$LOG_FILE" 2>&1; then
-    log "success: kopia snapshot complete"
-  else
-    local status=$?
-    log "failure: kopia snapshot exited with status $status"
+  run_kopia_with_network_monitor
+  status=$?
+  if [[ "$status" -ne 0 ]]; then
     log "kopia backup finished"
     exit "$status"
   fi
