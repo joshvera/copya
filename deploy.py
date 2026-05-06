@@ -8,6 +8,13 @@ def data(name):
     return host.data.get(name, getattr(defaults, name))
 
 
+def bool_data(name):
+    value = data(name)
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 user = data("user")
 home = data("home")
 backup_source = data("backup_source")
@@ -19,6 +26,7 @@ env_file = data("env_file")
 log_file = data("log_file")
 onepassword_cli_package = data("onepassword_cli_package")
 kopia_password_ref = data("kopia_password_ref")
+use_sudo = bool_data("use_sudo")
 
 runner_path = f"{runner_dir}/kopia-safe-run.sh"
 plist_path = f"{home}/Library/LaunchAgents/{launchd_label}.plist"
@@ -42,6 +50,28 @@ template_context = {
 }
 
 
+server.shell(
+    name="Validate configured macOS user and home",
+    commands=[
+        (
+            f'id -u "{user}" >/dev/null 2>&1 || '
+            f'(echo "Configured macOS user {user} does not exist; '
+            'update group_data/all.py or create the user first." >&2; exit 1)'
+        ),
+        (
+            f'test -d "{home}" || '
+            f'(echo "Configured home {home} does not exist. Refusing to create '
+            f'macOS user home directories; create/login as {user} first or '
+            'update group_data/all.py." >&2; exit 1)'
+        ),
+        (
+            f'test "$(stat -f %Su "{home}")" = "{user}" || '
+            f'(echo "Configured home {home} is not owned by {user}; refusing '
+            'to manage files there." >&2; exit 1)'
+        ),
+    ],
+)
+
 brew.packages(
     name="Install Kopia and 1Password CLI",
     packages=["kopia", onepassword_cli_package],
@@ -52,6 +82,7 @@ files.directory(
     path=runner_dir,
     mode="700",
     user=user,
+    _sudo=use_sudo,
 )
 
 files.directory(
@@ -59,6 +90,7 @@ files.directory(
     path=env_dir,
     mode="700",
     user=user,
+    _sudo=use_sudo,
 )
 
 files.directory(
@@ -66,6 +98,7 @@ files.directory(
     path=log_dir,
     mode="755",
     user=user,
+    _sudo=use_sudo,
 )
 
 files.directory(
@@ -73,6 +106,7 @@ files.directory(
     path=launch_agents_dir,
     mode="755",
     user=user,
+    _sudo=use_sudo,
 )
 
 files.template(
@@ -86,15 +120,17 @@ files.template(
     env_file=env_file,
     kopia_password_ref=kopia_password_ref,
     log_file=log_file,
+    _sudo=use_sudo,
 )
 
 files.template(
     name="Install Kopia LaunchAgent plist",
-    src="templates/com.josh.kopia.backup.plist.j2",
+    src="templates/kopia-backup.plist.j2",
     dest=plist_path,
     mode="644",
     user=user,
     **template_context,
+    _sudo=use_sudo,
 )
 
 server.shell(
@@ -102,6 +138,7 @@ server.shell(
     commands=[
         f'launchctl bootout "{launchd_domain}" "{plist_path}" || true',
     ],
+    _sudo=use_sudo,
 )
 
 server.shell(
@@ -109,6 +146,7 @@ server.shell(
     commands=[
         f'launchctl bootstrap "{launchd_domain}" "{plist_path}"',
     ],
+    _sudo=use_sudo,
 )
 
 server.shell(
@@ -116,6 +154,7 @@ server.shell(
     commands=[
         f'launchctl enable "{launchd_service}"',
     ],
+    _sudo=use_sudo,
 )
 
 server.shell(
@@ -123,4 +162,5 @@ server.shell(
     commands=[
         f'launchctl kickstart -k "{launchd_service}"',
     ],
+    _sudo=use_sudo,
 )

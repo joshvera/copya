@@ -1,19 +1,20 @@
-user = "josh"
-home = "/Users/josh"
+user = "vera"
+home = "/Users/vera"
 
-backup_source = "/Users/josh"
+backup_source = "/Users/vera"
 
 deny_ssids = [
     "Freeside",
     "cerise",
 ]
 
-launchd_label = "com.josh.kopia.backup"
+launchd_label = "com.vera.kopia.backup"
 run_interval_seconds = 21600
 
-runner_dir = "/Users/josh/.local/kopia-backup"
-env_file = "/Users/josh/.config/kopia-backup/env"
-log_file = "/Users/josh/Library/Logs/kopia-backup.log"
+runner_dir = "/Users/vera/.local/kopia-backup"
+env_file = "/Users/vera/.config/kopia-backup/env"
+log_file = "/Users/vera/Library/Logs/kopia-backup.log"
 
 onepassword_cli_package = "1password-cli"
-kopia_password_ref = "op://Freeside/Kopia/password"
+kopia_password_ref = "op://Private/Kopia/password"
+use_sudo = False

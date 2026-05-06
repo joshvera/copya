@@ -44,11 +44,11 @@ current_ssid() {
   case "$output" in
     "Current Wi-Fi Network: "*)
       printf '%s\n' "${output#Current Wi-Fi Network: }"
-      ;;
-    *)
-      return 1
+      return 0
       ;;
   esac
+
+  ipconfig getsummary "$device" 2>/dev/null | sed -n 's/^[[:space:]]*SSID[[:space:]]*: //p' | head -n 1
 }
 
 ssid_denied() {

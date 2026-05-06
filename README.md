@@ -34,10 +34,14 @@ If your vault, item, or field names differ, update `kopia_password_ref` in
 `group_data/all.py`.
 
 The deploy installs `1password-cli` with Homebrew. Before relying on launchd,
-verify that the `josh` user can read the secret non-interactively:
+verify that the `vera` user can read the secret non-interactively:
 
 ```bash
-op read op://Private/Kopia/password
+op read "$(python3 - <<'PY'
+from group_data import all
+print(all.kopia_password_ref)
+PY
+)"
 ```
 
 For unattended launchd runs, `op read` must work in the user session without
@@ -66,6 +70,18 @@ uv run pyinfra @local deploy.py --dry
 uv run pyinfra @local deploy.py
 ```
 
+The configured macOS user and home directory must already exist. This deploy
+will not create `/Users/vera`; macOS should create home directories through the
+normal user account/login flow.
+
+If you run the deploy as `vera`, sudo is not needed for the home-directory
+files. If you run it from another admin account and `/Users/vera` already
+exists, opt into sudo only for the user-home and launchd operations:
+
+```bash
+uv run pyinfra @local deploy.py --data use_sudo=true
+```
+
 The deploy uses modern per-user launchd commands directly:
 `bootstrap`, `bootout`, `enable`, and `kickstart` against `gui/$(id -u)`.
 
@@ -74,8 +90,8 @@ The deploy uses modern per-user launchd commands directly:
 Run the generated runner directly:
 
 ```bash
-/Users/josh/.local/kopia-backup/kopia-safe-run.sh
-tail -n 100 /Users/josh/Library/Logs/kopia-backup.log
+/Users/vera/.local/kopia-backup/kopia-safe-run.sh
+tail -n 100 /Users/vera/Library/Logs/kopia-backup.log
 ```
 
 The runner skips backups when no SSID is detected, or when the current SSID
@@ -84,14 +100,14 @@ is `Freeside` or `cerise`.
 ## Check launchd Status
 
 ```bash
-launchctl print gui/$(id -u)/com.josh.kopia.backup
+launchctl print gui/$(id -u)/com.vera.kopia.backup
 ```
 
 Useful follow-up commands:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.josh.kopia.backup
-tail -f /Users/josh/Library/Logs/kopia-backup.log
+launchctl kickstart -k gui/$(id -u)/com.vera.kopia.backup
+tail -f /Users/vera/Library/Logs/kopia-backup.log
 ```
 
 ## Restore Test
@@ -99,7 +115,7 @@ tail -f /Users/josh/Library/Logs/kopia-backup.log
 List snapshots and restore one into a temporary location:
 
 ```bash
-kopia snapshot list /Users/josh
+kopia snapshot list /Users/vera
 kopia snapshot restore <snapshot-id> /tmp/kopia-restore-test
 ```
 
