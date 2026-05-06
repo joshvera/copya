@@ -18,6 +18,14 @@ def bool_data(name):
 user = data("user")
 home = data("home")
 backup_source = data("backup_source")
+backup_ignore_file = data("backup_ignore_file")
+backup_ignore_patterns = data("backup_ignore_patterns")
+protected_data_probe_paths = data("protected_data_probe_paths")
+cloud_materialization_roots = data("cloud_materialization_roots")
+cloud_materialization_enabled = bool_data("cloud_materialization_enabled")
+cloud_materialization_requires_allowed_network = bool_data("cloud_materialization_requires_allowed_network")
+cloud_materialization_timeout_seconds = data("cloud_materialization_timeout_seconds")
+cloud_materialization_retry_seconds = data("cloud_materialization_retry_seconds")
 deny_ssids = data("deny_ssids")
 legacy_backup_launchd_label = data("legacy_backup_launchd_label")
 monitor_launchd_label = data("monitor_launchd_label")
@@ -26,6 +34,7 @@ network_check_interval_seconds = data("network_check_interval_seconds")
 preflight_failure_retry_seconds = data("preflight_failure_retry_seconds")
 runner_dir = data("runner_dir")
 log_file = data("log_file")
+raw_kopia_log_file = data("raw_kopia_log_file")
 status_file = data("status_file")
 app_name = data("app_name")
 app_executable_name = data("app_executable_name")
@@ -70,7 +79,14 @@ template_context = {
     "app_executable_name": app_executable_name,
     "app_executable_path": app_executable_path,
     "app_name": app_name,
+    "backup_ignore_file": backup_ignore_file,
+    "backup_ignore_patterns": backup_ignore_patterns,
     "backup_source": backup_source,
+    "cloud_materialization_enabled": cloud_materialization_enabled,
+    "cloud_materialization_requires_allowed_network": cloud_materialization_requires_allowed_network,
+    "cloud_materialization_retry_seconds": cloud_materialization_retry_seconds,
+    "cloud_materialization_roots": cloud_materialization_roots,
+    "cloud_materialization_timeout_seconds": cloud_materialization_timeout_seconds,
     "deny_ssids": deny_ssids,
     "home": home,
     "kopia_password_ref": kopia_password_ref,
@@ -78,6 +94,8 @@ template_context = {
     "monitor_launchd_label": monitor_launchd_label,
     "network_check_interval_seconds": network_check_interval_seconds,
     "preflight_failure_retry_seconds": preflight_failure_retry_seconds,
+    "raw_kopia_log_file": raw_kopia_log_file,
+    "protected_data_probe_paths": protected_data_probe_paths,
     "run_interval_seconds": run_interval_seconds,
     "runner_dir": runner_dir,
     "status_file": status_file,
@@ -146,6 +164,16 @@ files.directory(
     path=launch_agents_dir,
     mode="755",
     user=user,
+    _sudo=use_sudo,
+)
+
+files.template(
+    name="Install Kopia ignore rules",
+    src="templates/kopiaignore.j2",
+    dest=backup_ignore_file,
+    mode="644",
+    user=user,
+    **template_context,
     _sudo=use_sudo,
 )
 
@@ -271,6 +299,18 @@ server.shell(
     name="Bootout existing Kopia monitor LaunchAgent",
     commands=[
         f'launchctl bootout "{launchd_domain}" "{monitor_plist_path}" || true',
+    ],
+    _sudo=use_sudo,
+)
+
+server.shell(
+    name="Stop unmanaged COPYA monitor processes",
+    commands=[
+        f'osascript -e \'tell application id "{app_bundle_identifier}" to quit\' || true',
+        "sleep 2",
+        f'pkill -TERM -f "^{app_executable_path}( |$)" || true',
+        "sleep 2",
+        f'pkill -KILL -f "^{app_executable_path}( |$)" || true',
     ],
     _sudo=use_sudo,
 )

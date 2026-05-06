@@ -72,6 +72,64 @@ The deploy:
 The configured macOS user and home directory must already exist. This deploy
 will not create `/Users/vera`.
 
+## Backup Scope
+
+COPYA snapshots `/Users/vera`. Kopia's default `.kopiaignore` mechanism is
+managed from `group_data/all.py` and rendered to:
+
+```bash
+/Users/vera/.kopiaignore
+```
+
+The default posture is complete local backup, so `backup_ignore_patterns` is
+empty. Desktop, Documents, iCloud Drive containers, Dropbox/FileProvider roots,
+and protected app data are intended to be backed up when macOS allows COPYA and
+Kopia to read them.
+
+Cloud-backed roots are configured in `cloud_materialization_roots`. Before
+starting Kopia, COPYA probes protected-data access, attempts best-effort iCloud
+downloads with `brctl download` and macOS ubiquitous-item download requests,
+then classifies files as local-readable, dataless cloud placeholders, or real
+read failures. If that preparation is aborted by network policy, missing SSID
+visibility, permission failure, or timeout, COPYA blocks the snapshot and
+records `Cloud Download Blocked`.
+
+During cloud preparation, the menu bar keeps the `COPYA` title and shows a
+state icon. The menu and `status.json` report the current cloud root, phase,
+and read-through counters while the preparation is running.
+
+Dataless cloud placeholders are normal macOS/iCloud/Dropbox/FileProvider
+stubs: the path and metadata exist locally, but the bytes are not on disk yet.
+COPYA does not open known dataless placeholders during preparation because that
+produces low-value `resource deadlock avoided` noise. If placeholders remain,
+COPYA reports `Cloud Partial`, keeps sample paths in `status.json`, and still
+backs up readable local data. Newly downloaded files are included on the next
+backup once macOS clears the dataless flag.
+
+Real per-file read failures are reported separately from dataless placeholders,
+but they do not block Kopia by themselves. COPYA still blocks on network denial,
+missing SSID visibility, permission failures, timeout, or an explicit abort.
+Kopia is the authoritative snapshot engine for the final backup result.
+
+The main COPYA log summarizes known dataless/deadlock read noise. Raw Kopia
+output is retained separately at:
+
+```bash
+/Users/vera/.local/kopia-backup/kopia-raw.log
+```
+
+If you want complete cloud coverage, disable iCloud Drive "Optimize Mac
+Storage" and use provider UI such as "Make Available Offline" for Dropbox or
+other FileProvider roots, then wait for downloads to finish before the next
+COPYA run.
+
+To intentionally skip a noisy or unwanted path, add a pattern to
+`backup_ignore_patterns` and redeploy. For example:
+
+```text
+/Library/CloudStorage
+```
+
 ## Signing
 
 The local app is signed with the identity configured in `group_data/all.py`:
@@ -106,12 +164,41 @@ state and blocks backups. This is required because the policy is exact SSID
 denylist matching: `Freeside` and `cerise` are denied; all exact non-denied
 SSIDs, including `MANAWA`, are allowed.
 
+## Grant Full Disk Access
+
+COPYA needs Full Disk Access for a complete home backup that includes protected
+macOS data such as Desktop/Documents privacy areas, iCloud Drive containers,
+Mail, Messages, Safari, and Photos libraries.
+
+Open System Settings -> Privacy & Security -> Full Disk Access and add:
+
+```bash
+/Users/vera/.local/kopia-backup/COPYA.app
+```
+
+If COPYA still reports `Needs Full Disk Access` after granting it, add the
+Homebrew Kopia executable as a fallback because Kopia is the child process that
+ultimately opens files:
+
+```bash
+/opt/homebrew/bin/kopia
+```
+
+Photos needs local originals for a complete file-level backup. If iCloud Photos
+is set to optimize storage, a raw Kopia backup may not contain full-resolution
+photo originals until Photos has downloaded them locally.
+
 ## Monitor and Control
 
 The menu bar app shows:
 
-- current state: Ready, Syncing, Paused, Needs Permission, Failed, or Disabled;
+- current state: Ready, Preparing Cloud Files, Syncing, Paused, Needs
+  Permission, Needs Full Disk Access, Cloud Download Blocked, Cloud Partial,
+  Failed, or Disabled;
 - current SSID and policy reason;
+- cloud preparation status;
+- dataless placeholder and real read-failure counts when cloud coverage is
+  partial;
 - next scheduled run;
 - last successful backup;
 - active Kopia PID when syncing;
@@ -150,6 +237,13 @@ Scheduling rules:
 
 - if no backup has ever completed and the network becomes allowed, start one
   immediately;
+- before Kopia starts, probe protected-data access and prepare configured cloud
+  roots;
+- if Full Disk Access is missing, show `Needs Full Disk Access` and retry later;
+- if cloud materialization is blocked by network, permission, or timeout, show
+  `Cloud Download Blocked` and retry later;
+- if Kopia succeeds while dataless placeholders remain, show `Cloud Partial`
+  instead of hiding the incomplete cloud coverage;
 - if a preflight step such as reading the 1Password secret fails, retry that
   preflight after `preflight_failure_retry_seconds`;
 - after a successful backup, schedule the next run at

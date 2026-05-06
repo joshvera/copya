@@ -1,0 +1,5 @@
+# Managed by pyinfra from group_data/all.py.
+# Patterns are relative to {{ backup_source }}.
+{% for pattern in backup_ignore_patterns -%}
+{{ pattern }}
+{% endfor %}

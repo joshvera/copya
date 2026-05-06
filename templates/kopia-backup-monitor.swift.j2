@@ -12,7 +12,28 @@ enum Config {
     static let bundleIdentifier = "{{ app_bundle_identifier }}"
     static let monitorLaunchdLabel = "{{ monitor_launchd_label }}"
     static let backupSource = "{{ backup_source }}"
+    static let backupIgnoreFile = "{{ backup_ignore_file }}"
+    static let backupIgnorePatterns: [String] = [
+{% for pattern in backup_ignore_patterns %}
+        "{{ pattern }}",
+{% endfor %}
+    ]
+    static let protectedDataProbePaths: [String] = [
+{% for path in protected_data_probe_paths %}
+        "{{ path }}",
+{% endfor %}
+    ]
+    static let cloudMaterializationRoots: [String] = [
+{% for root in cloud_materialization_roots %}
+        "{{ root }}",
+{% endfor %}
+    ]
+    static let cloudMaterializationEnabled = {{ "true" if cloud_materialization_enabled else "false" }}
+    static let cloudMaterializationRequiresAllowedNetwork = {{ "true" if cloud_materialization_requires_allowed_network else "false" }}
+    static let cloudMaterializationTimeoutSeconds = {{ cloud_materialization_timeout_seconds }}
+    static let cloudMaterializationRetrySeconds = {{ cloud_materialization_retry_seconds }}
     static let logFile = "{{ log_file }}"
+    static let rawKopiaLogFile = "{{ raw_kopia_log_file }}"
     static let statusFile = "{{ status_file }}"
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
@@ -54,6 +75,14 @@ enum DateFormatters {
 struct ConfigSummary: Codable {
     var app_name: String
     var backup_source: String
+    var backup_ignore_file: String
+    var backup_ignore_patterns: [String]
+    var protected_data_probe_paths: [String]
+    var cloud_materialization_roots: [String]
+    var cloud_materialization_enabled: Bool
+    var cloud_materialization_requires_allowed_network: Bool
+    var cloud_materialization_timeout_seconds: Int
+    var cloud_materialization_retry_seconds: Int
     var run_interval_seconds: Int
     var network_check_interval_seconds: Int
     var preflight_failure_retry_seconds: Int
@@ -62,6 +91,7 @@ struct ConfigSummary: Codable {
     var app_bundle_identifier: String
     var monitor_launchd_label: String
     var log_file: String
+    var raw_kopia_log_file: String
     var status_file: String
 }
 
@@ -69,6 +99,14 @@ extension ConfigSummary {
     enum CodingKeys: String, CodingKey {
         case app_name
         case backup_source
+        case backup_ignore_file
+        case backup_ignore_patterns
+        case protected_data_probe_paths
+        case cloud_materialization_roots
+        case cloud_materialization_enabled
+        case cloud_materialization_requires_allowed_network
+        case cloud_materialization_timeout_seconds
+        case cloud_materialization_retry_seconds
         case run_interval_seconds
         case network_check_interval_seconds
         case preflight_failure_retry_seconds
@@ -77,6 +115,7 @@ extension ConfigSummary {
         case app_bundle_identifier
         case monitor_launchd_label
         case log_file
+        case raw_kopia_log_file
         case status_file
     }
 
@@ -84,6 +123,14 @@ extension ConfigSummary {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         app_name = try container.decodeIfPresent(String.self, forKey: .app_name) ?? Config.appName
         backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
+        backup_ignore_file = try container.decodeIfPresent(String.self, forKey: .backup_ignore_file) ?? Config.backupIgnoreFile
+        backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_ignore_patterns) ?? Config.backupIgnorePatterns
+        protected_data_probe_paths = try container.decodeIfPresent([String].self, forKey: .protected_data_probe_paths) ?? Config.protectedDataProbePaths
+        cloud_materialization_roots = try container.decodeIfPresent([String].self, forKey: .cloud_materialization_roots) ?? Config.cloudMaterializationRoots
+        cloud_materialization_enabled = try container.decodeIfPresent(Bool.self, forKey: .cloud_materialization_enabled) ?? Config.cloudMaterializationEnabled
+        cloud_materialization_requires_allowed_network = try container.decodeIfPresent(Bool.self, forKey: .cloud_materialization_requires_allowed_network) ?? Config.cloudMaterializationRequiresAllowedNetwork
+        cloud_materialization_timeout_seconds = try container.decodeIfPresent(Int.self, forKey: .cloud_materialization_timeout_seconds) ?? Config.cloudMaterializationTimeoutSeconds
+        cloud_materialization_retry_seconds = try container.decodeIfPresent(Int.self, forKey: .cloud_materialization_retry_seconds) ?? Config.cloudMaterializationRetrySeconds
         run_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .run_interval_seconds) ?? Config.runIntervalSeconds
         network_check_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .network_check_interval_seconds) ?? Config.networkCheckIntervalSeconds
         preflight_failure_retry_seconds = try container.decodeIfPresent(Int.self, forKey: .preflight_failure_retry_seconds) ?? Config.preflightFailureRetrySeconds
@@ -92,6 +139,7 @@ extension ConfigSummary {
         app_bundle_identifier = try container.decodeIfPresent(String.self, forKey: .app_bundle_identifier) ?? Config.bundleIdentifier
         monitor_launchd_label = try container.decodeIfPresent(String.self, forKey: .monitor_launchd_label) ?? Config.monitorLaunchdLabel
         log_file = try container.decodeIfPresent(String.self, forKey: .log_file) ?? Config.logFile
+        raw_kopia_log_file = try container.decodeIfPresent(String.self, forKey: .raw_kopia_log_file) ?? Config.rawKopiaLogFile
         status_file = try container.decodeIfPresent(String.self, forKey: .status_file) ?? Config.statusFile
     }
 }
@@ -108,6 +156,135 @@ struct NetworkSnapshot: Codable {
     var deny_ssids: [String]
 }
 
+struct ProtectedDataProbeResult: Codable {
+    var path: String
+    var exists: Bool
+    var readable: Bool
+    var is_directory: Bool
+    var error: String?
+}
+
+struct CloudMaterializationRootResult: Codable {
+    var root: String
+    var exists: Bool
+    var directories_seen: Int
+    var files_seen: Int
+    var files_read: Int
+    var dataless_placeholders: Int
+    var read_failures: Int
+    var failures: Int
+    var aborted: Bool
+    var timed_out: Bool
+    var last_error: String?
+    var dataless_sample_paths: [String]
+    var read_failure_sample_paths: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case root
+        case exists
+        case directories_seen
+        case files_seen
+        case files_read
+        case dataless_placeholders
+        case read_failures
+        case failures
+        case aborted
+        case timed_out
+        case last_error
+        case dataless_sample_paths
+        case read_failure_sample_paths
+    }
+
+    init(
+        root: String,
+        exists: Bool,
+        directories_seen: Int,
+        files_seen: Int,
+        files_read: Int,
+        dataless_placeholders: Int = 0,
+        read_failures: Int? = nil,
+        failures: Int,
+        aborted: Bool,
+        timed_out: Bool,
+        last_error: String?,
+        dataless_sample_paths: [String] = [],
+        read_failure_sample_paths: [String] = []
+    ) {
+        self.root = root
+        self.exists = exists
+        self.directories_seen = directories_seen
+        self.files_seen = files_seen
+        self.files_read = files_read
+        self.dataless_placeholders = dataless_placeholders
+        self.read_failures = read_failures ?? failures
+        self.failures = failures
+        self.aborted = aborted
+        self.timed_out = timed_out
+        self.last_error = last_error
+        self.dataless_sample_paths = dataless_sample_paths
+        self.read_failure_sample_paths = read_failure_sample_paths
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        root = try container.decode(String.self, forKey: .root)
+        exists = try container.decode(Bool.self, forKey: .exists)
+        directories_seen = try container.decode(Int.self, forKey: .directories_seen)
+        files_seen = try container.decode(Int.self, forKey: .files_seen)
+        files_read = try container.decode(Int.self, forKey: .files_read)
+        dataless_placeholders = try container.decodeIfPresent(Int.self, forKey: .dataless_placeholders) ?? 0
+        failures = try container.decode(Int.self, forKey: .failures)
+        read_failures = try container.decodeIfPresent(Int.self, forKey: .read_failures) ?? failures
+        aborted = try container.decode(Bool.self, forKey: .aborted)
+        timed_out = try container.decode(Bool.self, forKey: .timed_out)
+        last_error = try container.decodeIfPresent(String.self, forKey: .last_error)
+        dataless_sample_paths = try container.decodeIfPresent([String].self, forKey: .dataless_sample_paths) ?? []
+        read_failure_sample_paths = try container.decodeIfPresent([String].self, forKey: .read_failure_sample_paths) ?? []
+    }
+}
+
+struct CloudMaterializationSnapshot: Codable {
+    var enabled: Bool
+    var started_at: String?
+    var finished_at: String?
+    var completed: Bool
+    var aborted: Bool
+    var reason: String?
+    var current_root: String?
+    var current_phase: String?
+    var total_directories_seen: Int
+    var total_files_seen: Int
+    var total_files_read: Int
+    var total_failures: Int
+    var total_dataless_placeholders: Int? = nil
+    var total_read_failures: Int? = nil
+    var cloud_coverage: String? = nil
+    var roots: [CloudMaterializationRootResult]
+}
+
+extension CloudMaterializationSnapshot {
+    static func empty() -> CloudMaterializationSnapshot {
+        CloudMaterializationSnapshot(
+            enabled: Config.cloudMaterializationEnabled,
+            started_at: nil,
+            finished_at: nil,
+            completed: false,
+            aborted: false,
+            reason: nil,
+            current_root: nil,
+            current_phase: nil,
+            total_directories_seen: 0,
+            total_files_seen: 0,
+            total_files_read: 0,
+            total_failures: 0,
+            total_dataless_placeholders: 0,
+            total_read_failures: 0,
+            cloud_coverage: nil,
+            roots: []
+        )
+    }
+}
+
 struct StatusSnapshot: Codable {
     var app_version: String
     var updated_at: String
@@ -121,9 +298,13 @@ struct StatusSnapshot: Codable {
     var active_pid: Int32?
     var last_start_at: String?
     var last_success_at: String?
+    var last_success_cloud_coverage: String?
     var last_failure_at: String?
     var last_failure: String?
     var last_abort_reason: String?
+    var protected_data_probe_results: [ProtectedDataProbeResult]?
+    var cloud_materialization: CloudMaterializationSnapshot?
+    var kopia_ran_after_materialization: Bool?
     var config_summary: ConfigSummary
 
     enum CodingKeys: String, CodingKey {
@@ -139,9 +320,13 @@ struct StatusSnapshot: Codable {
         case active_pid
         case last_start_at
         case last_success_at
+        case last_success_cloud_coverage
         case last_failure_at
         case last_failure
         case last_abort_reason
+        case protected_data_probe_results
+        case cloud_materialization
+        case kopia_ran_after_materialization
         case config_summary
     }
 
@@ -160,9 +345,13 @@ struct StatusSnapshot: Codable {
         try encodeOptional(active_pid, into: &container, forKey: .active_pid)
         try encodeOptional(last_start_at, into: &container, forKey: .last_start_at)
         try encodeOptional(last_success_at, into: &container, forKey: .last_success_at)
+        try encodeOptional(last_success_cloud_coverage, into: &container, forKey: .last_success_cloud_coverage)
         try encodeOptional(last_failure_at, into: &container, forKey: .last_failure_at)
         try encodeOptional(last_failure, into: &container, forKey: .last_failure)
         try encodeOptional(last_abort_reason, into: &container, forKey: .last_abort_reason)
+        try encodeOptional(protected_data_probe_results, into: &container, forKey: .protected_data_probe_results)
+        try encodeOptional(cloud_materialization, into: &container, forKey: .cloud_materialization)
+        try encodeOptional(kopia_ran_after_materialization, into: &container, forKey: .kopia_ran_after_materialization)
     }
 
     private func encodeOptional<T: Encodable>(
@@ -180,9 +369,13 @@ struct StatusSnapshot: Codable {
 
 enum BackupState: String {
     case ready
+    case preparingCloudFiles = "preparing_cloud_files"
     case syncing
     case paused
     case needsPermission = "needs_permission"
+    case needsFullDiskAccess = "needs_full_disk_access"
+    case cloudDownloadBlocked = "cloud_download_blocked"
+    case cloudPartial = "cloud_partial"
     case failed
     case disabled
 }
@@ -209,8 +402,12 @@ enum LocationStatus {
 }
 
 enum NetworkPolicy {
-    static func current(isExpensive: Bool, isConstrained: Bool) -> NetworkSnapshot {
-        let authorization = CLLocationManager().authorizationStatus
+    static func current(
+        isExpensive: Bool,
+        isConstrained: Bool,
+        authorization: CLAuthorizationStatus? = nil
+    ) -> NetworkSnapshot {
+        let authorization = authorization ?? CLLocationManager().authorizationStatus
         let authorizationName = LocationStatus.name(authorization)
 
         guard CLLocationManager.locationServicesEnabled() else {
@@ -360,6 +557,7 @@ struct CommandResult {
     var status: Int32
     var stdout: String
     var stderr: String
+    var timedOut: Bool = false
 }
 
 enum CommandRunner {
@@ -376,11 +574,13 @@ enum CommandRunner {
     static func run(
         _ executable: String,
         arguments: [String],
-        environment: [String: String]? = nil
+        environment: [String: String]? = nil,
+        timeoutSeconds: Int? = nil
     ) throws -> CommandResult {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
+        let semaphore = DispatchSemaphore(value: 0)
 
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -389,18 +589,57 @@ enum CommandRunner {
         }
         process.standardOutput = stdout
         process.standardError = stderr
+        if timeoutSeconds != nil {
+            process.terminationHandler = { _ in
+                semaphore.signal()
+            }
+        }
 
         try process.run()
-        process.waitUntilExit()
+        var timedOut = false
+        if let timeoutSeconds {
+            if semaphore.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+                timedOut = true
+                process.terminate()
+                if semaphore.wait(timeout: .now() + .seconds(5)) == .timedOut {
+                    kill(process.processIdentifier, SIGKILL)
+                    _ = semaphore.wait(timeout: .now() + .seconds(5))
+                }
+            }
+        } else {
+            process.waitUntilExit()
+        }
 
         let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
         let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
 
         return CommandResult(
-            status: process.terminationStatus,
+            status: timedOut ? 124 : process.terminationStatus,
             stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+            stderr: String(data: stderrData, encoding: .utf8) ?? "",
+            timedOut: timedOut
         )
+    }
+}
+
+enum FileFlags {
+    private static let sfDataless = UInt32(0x40000000)
+
+    static func flags(for url: URL) -> UInt32? {
+        url.path.withCString { path in
+            var statBuffer = stat()
+            guard lstat(path, &statBuffer) == 0 else {
+                return nil
+            }
+            return statBuffer.st_flags
+        }
+    }
+
+    static func isDataless(_ url: URL) -> Bool {
+        guard let flags = flags(for: url) else {
+            return false
+        }
+        return (flags & sfDataless) != 0
     }
 }
 
@@ -412,22 +651,34 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var nextRunAt: Date?
     @Published var lastStartAt: Date?
     @Published var lastSuccessAt: Date?
+    @Published var lastSuccessCloudCoverage: String?
     @Published var lastFailureAt: Date?
     @Published var lastFailure: String?
     @Published var lastAbortReason: String?
     @Published var activePID: Int32?
+    @Published var protectedDataProbeResults: [ProtectedDataProbeResult] = []
+    @Published var cloudMaterialization = CloudMaterializationSnapshot.empty()
+    @Published var kopiaRanAfterMaterialization = false
 
     private let locationManager = CLLocationManager()
     private let pathMonitor = NWPathMonitor()
     private let pathQueue = DispatchQueue(label: "kopia.monitor.network-path")
+    private let materializationQueue = DispatchQueue(label: "kopia.monitor.cloud-materialization", qos: .utility)
     private var timer: Timer?
     private var started = false
     private var activeProcess: Process?
     private var activePipe: Pipe?
+    private var kopiaOutputBuffer = ""
+    private var kopiaSuppressedDatalessReadErrors = 0
+    private var kopiaOtherOutputReadErrors = 0
+    private var activeMaterializationID: UUID?
     private var stopReason: String?
     private var lastNetworkCheckAt = Date.distantPast
+    private var lastMaterializationNetworkCheckAt = Date.distantPast
     private var pathIsExpensive = false
     private var pathIsConstrained = false
+    private var fullDiskAccessBlocked = false
+    private var cloudDownloadBlocked = false
 
     private override init() {
         super.init()
@@ -495,8 +746,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             appendLog("start ignored: backup already running pid=\(activePID ?? 0)")
             return
         }
+        guard activeMaterializationID == nil else {
+            appendLog("start ignored: cloud materialization already running")
+            return
+        }
 
-        network = NetworkPolicy.current(isExpensive: pathIsExpensive, isConstrained: pathIsConstrained)
+        network = currentNetworkSnapshot()
         guard network.allowed else {
             appendLog("start blocked: network_state=\(network.state) reason='\(network.reason)'")
             updateDerivedState()
@@ -511,6 +766,198 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
             recordPreflightFailure("Kopia is not installed or not on PATH")
+            return
+        }
+
+        startPreflightAndMaterialization(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath)
+    }
+
+    private func startPreflightAndMaterialization(trigger: String, opPath: String, kopiaPath: String) {
+        let materializationID = UUID()
+        activeMaterializationID = materializationID
+        lastMaterializationNetworkCheckAt = Date()
+        fullDiskAccessBlocked = false
+        cloudDownloadBlocked = false
+        protectedDataProbeResults = []
+        cloudMaterialization = CloudMaterializationSnapshot(
+            enabled: Config.cloudMaterializationEnabled,
+            started_at: DateFormatters.iso.string(from: Date()),
+            finished_at: nil,
+            completed: false,
+            aborted: false,
+            reason: "running",
+            current_root: nil,
+            current_phase: "preflight",
+            total_directories_seen: 0,
+            total_files_seen: 0,
+            total_files_read: 0,
+            total_failures: 0,
+            total_dataless_placeholders: 0,
+            total_read_failures: 0,
+            cloud_coverage: nil,
+            roots: []
+        )
+        state = Config.cloudMaterializationEnabled ? .preparingCloudFiles : .ready
+        lastFailure = nil
+        lastFailureAt = nil
+        lastAbortReason = nil
+        kopiaRanAfterMaterialization = false
+        appendLog("cloud materialization starting trigger=\(trigger)")
+        writeStatus()
+
+        materializationQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let probeResults = self.runProtectedDataProbes()
+            let unreadableProbeCount = probeResults.filter { $0.exists && !$0.readable }.count
+            DispatchQueue.main.async {
+                guard self.activeMaterializationID == materializationID else {
+                    return
+                }
+
+                self.protectedDataProbeResults = probeResults
+                self.appendLog("protected data probes complete paths=\(probeResults.count) unreadable=\(unreadableProbeCount)")
+                self.writeStatus()
+            }
+
+            if let abortReason = self.materializationAbortReason(for: materializationID) {
+                DispatchQueue.main.async {
+                    self.finishMaterialization(
+                        id: materializationID,
+                        probeResults: probeResults,
+                        snapshot: self.abortedMaterializationSnapshot(reason: abortReason),
+                        trigger: trigger,
+                        opPath: opPath,
+                        kopiaPath: kopiaPath
+                    )
+                }
+                return
+            }
+
+            let unreadableProtectedPaths = probeResults.filter { $0.exists && !$0.readable }
+            guard unreadableProtectedPaths.isEmpty else {
+                let message = "Full Disk Access required for: \(unreadableProtectedPaths.map { $0.path }.joined(separator: ", "))"
+                DispatchQueue.main.async {
+                    self.finishFullDiskAccessFailure(
+                        id: materializationID,
+                        probeResults: probeResults,
+                        message: message
+                    )
+                }
+                return
+            }
+
+            let snapshot: CloudMaterializationSnapshot
+            if Config.cloudMaterializationEnabled {
+                snapshot = self.runCloudMaterialization(id: materializationID)
+            } else {
+                snapshot = CloudMaterializationSnapshot(
+                    enabled: false,
+                    started_at: DateFormatters.iso.string(from: Date()),
+                    finished_at: DateFormatters.iso.string(from: Date()),
+                    completed: true,
+                    aborted: false,
+                    reason: "disabled",
+                    current_root: nil,
+                    current_phase: nil,
+                    total_directories_seen: 0,
+                    total_files_seen: 0,
+                    total_files_read: 0,
+                    total_failures: 0,
+                    total_dataless_placeholders: 0,
+                    total_read_failures: 0,
+                    cloud_coverage: "disabled",
+                    roots: []
+                )
+            }
+
+            DispatchQueue.main.async {
+                self.finishMaterialization(
+                    id: materializationID,
+                    probeResults: probeResults,
+                    snapshot: snapshot,
+                    trigger: trigger,
+                    opPath: opPath,
+                    kopiaPath: kopiaPath
+                )
+            }
+        }
+    }
+
+    private func finishFullDiskAccessFailure(
+        id: UUID,
+        probeResults: [ProtectedDataProbeResult],
+        message: String
+    ) {
+        guard activeMaterializationID == id else {
+            return
+        }
+
+        activeMaterializationID = nil
+        protectedDataProbeResults = probeResults
+        cloudMaterialization = abortedMaterializationSnapshot(reason: message)
+        fullDiskAccessBlocked = true
+        cloudDownloadBlocked = false
+        lastFailureAt = Date()
+        lastFailure = message
+        nextRunAt = Date().addingTimeInterval(TimeInterval(Config.cloudMaterializationRetrySeconds))
+        appendLog("failure: \(message); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func finishMaterialization(
+        id: UUID,
+        probeResults: [ProtectedDataProbeResult],
+        snapshot: CloudMaterializationSnapshot,
+        trigger: String,
+        opPath: String,
+        kopiaPath: String
+    ) {
+        guard activeMaterializationID == id else {
+            return
+        }
+
+        activeMaterializationID = nil
+        protectedDataProbeResults = probeResults
+        cloudMaterialization = snapshot
+
+        guard snapshot.completed && !snapshot.aborted else {
+            let reason = snapshot.reason ?? "cloud materialization did not complete"
+            cloudDownloadBlocked = true
+            fullDiskAccessBlocked = false
+            lastFailureAt = Date()
+            lastFailure = "Cloud download blocked: \(reason)"
+            if snapshot.aborted {
+                lastAbortReason = reason
+            }
+            nextRunAt = Date().addingTimeInterval(TimeInterval(Config.cloudMaterializationRetrySeconds))
+            appendLog("failure: cloud materialization blocked: \(reason); retrying at \(DateFormatters.iso.string(from: nextRunAt!))")
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
+        let datalessPlaceholders = snapshot.total_dataless_placeholders ?? 0
+        let readFailures = snapshot.total_read_failures ?? snapshot.total_failures
+        if datalessPlaceholders > 0 || readFailures > 0 {
+            appendLog("warning: cloud materialization partial dataless_placeholders=\(datalessPlaceholders) read_failures=\(readFailures); starting Kopia anyway")
+        }
+        appendLog("cloud materialization complete files_read=\(snapshot.total_files_read) dataless_placeholders=\(datalessPlaceholders) read_failures=\(readFailures) roots=\(snapshot.roots.count)")
+        launchKopia(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath, ranAfterMaterialization: Config.cloudMaterializationEnabled)
+    }
+
+    private func launchKopia(
+        trigger: String,
+        opPath: String,
+        kopiaPath: String,
+        ranAfterMaterialization: Bool
+    ) {
+        network = currentNetworkSnapshot()
+        guard network.allowed else {
+            recordPreflightFailure("Network changed before Kopia start: state=\(network.state) reason='\(network.reason)'")
             return
         }
 
@@ -558,7 +1005,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             guard !data.isEmpty else {
                 return
             }
-            self?.appendDataToLog(data)
+            self?.handleKopiaOutputData(data)
         }
 
         process.terminationHandler = { [weak self] finished in
@@ -578,20 +1025,557 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         activeProcess = process
         activePipe = pipe
         activePID = process.processIdentifier
+        kopiaOutputBuffer = ""
+        kopiaSuppressedDatalessReadErrors = 0
+        kopiaOtherOutputReadErrors = 0
         stopReason = nil
         lastStartAt = Date()
         lastFailure = nil
         lastFailureAt = nil
         lastAbortReason = nil
         lastNetworkCheckAt = Date()
+        kopiaRanAfterMaterialization = ranAfterMaterialization
         state = .syncing
 
         appendLog("kopia backup starting trigger=\(trigger) pid=\(process.processIdentifier)")
         appendLog("running: kopia snapshot create --no-progress \(Config.backupSource)")
+        appendDataToFile(
+            "\(DateFormatters.log.string(from: Date())) raw kopia output starting pid=\(process.processIdentifier)\n".data(using: .utf8) ?? Data(),
+            path: Config.rawKopiaLogFile
+        )
         writeStatus()
     }
 
+    private func runProtectedDataProbes() -> [ProtectedDataProbeResult] {
+        Config.protectedDataProbePaths.map { path in
+            let url = URL(fileURLWithPath: path)
+            var isDirectory = ObjCBool(false)
+            let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+
+            guard exists else {
+                return ProtectedDataProbeResult(
+                    path: path,
+                    exists: false,
+                    readable: true,
+                    is_directory: false,
+                    error: nil
+                )
+            }
+
+            do {
+                if isDirectory.boolValue {
+                    _ = try FileManager.default.contentsOfDirectory(atPath: path).prefix(1)
+                } else {
+                    let handle = try FileHandle(forReadingFrom: url)
+                    _ = try handle.read(upToCount: 1)
+                    try? handle.close()
+                }
+
+                return ProtectedDataProbeResult(
+                    path: path,
+                    exists: true,
+                    readable: true,
+                    is_directory: isDirectory.boolValue,
+                    error: nil
+                )
+            } catch {
+                return ProtectedDataProbeResult(
+                    path: path,
+                    exists: true,
+                    readable: false,
+                    is_directory: isDirectory.boolValue,
+                    error: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func runCloudMaterialization(id: UUID) -> CloudMaterializationSnapshot {
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(TimeInterval(Config.cloudMaterializationTimeoutSeconds))
+        var roots: [CloudMaterializationRootResult] = []
+        var abortReason: String?
+
+        publishCloudMaterializationProgress(
+            id: id,
+            startedAt: startedAt,
+            roots: [],
+            currentRoot: nil,
+            currentPhase: "starting",
+            logMessage: "cloud materialization progress phase=starting roots=\(Config.cloudMaterializationRoots.count)"
+        )
+
+        for root in Config.cloudMaterializationRoots {
+            if let reason = materializationAbortReason(for: id) {
+                abortReason = reason
+                break
+            }
+
+            let result = materializeRoot(
+                root,
+                deadline: deadline,
+                id: id,
+                progress: { phase, partial, shouldLog in
+                    self.publishCloudMaterializationProgress(
+                        id: id,
+                        startedAt: startedAt,
+                        roots: roots + [partial],
+                        currentRoot: root,
+                        currentPhase: phase,
+                        logMessage: shouldLog ? self.cloudMaterializationLogMessage(phase: phase, result: partial) : nil
+                    )
+                }
+            )
+            roots.append(result)
+            publishCloudMaterializationProgress(
+                id: id,
+                startedAt: startedAt,
+                roots: roots,
+                currentRoot: root,
+                currentPhase: result.aborted ? "aborted" : (result.timed_out ? "timed out" : "root complete"),
+                logMessage: nil
+            )
+
+            if result.aborted {
+                abortReason = result.last_error ?? "cloud materialization aborted"
+                break
+            }
+
+            if result.timed_out {
+                abortReason = "cloud materialization timed out"
+                break
+            }
+        }
+
+        let totals = materializationTotals(roots: roots)
+        let timedOut = roots.contains { $0.timed_out }
+        let aborted = abortReason != nil && !timedOut
+        let readFailures = totals.readFailures
+        let datalessPlaceholders = totals.dataless
+        let completed = abortReason == nil && !timedOut
+        let cloudCoverage: String
+        if completed && datalessPlaceholders == 0 && readFailures == 0 {
+            cloudCoverage = "complete"
+        } else if completed {
+            cloudCoverage = "partial"
+        } else {
+            cloudCoverage = "blocked"
+        }
+
+        let reason: String?
+        if completed && datalessPlaceholders == 0 && readFailures == 0 {
+            reason = "completed"
+        } else if completed {
+            var parts: [String] = []
+            if datalessPlaceholders > 0 {
+                parts.append("\(datalessPlaceholders) dataless placeholders")
+            }
+            if readFailures > 0 {
+                parts.append("\(readFailures) read failures")
+            }
+            reason = "completed with \(parts.joined(separator: ", "))"
+        } else if let abortReason {
+            reason = abortReason
+        } else if readFailures > 0 {
+            reason = "\(readFailures) cloud materialization read failures"
+        } else {
+            reason = "cloud materialization did not complete"
+        }
+
+        return CloudMaterializationSnapshot(
+            enabled: Config.cloudMaterializationEnabled,
+            started_at: DateFormatters.iso.string(from: startedAt),
+            finished_at: DateFormatters.iso.string(from: Date()),
+            completed: completed,
+            aborted: aborted,
+            reason: reason,
+            current_root: nil,
+            current_phase: nil,
+            total_directories_seen: totals.directories,
+            total_files_seen: totals.filesSeen,
+            total_files_read: totals.filesRead,
+            total_failures: readFailures,
+            total_dataless_placeholders: datalessPlaceholders,
+            total_read_failures: readFailures,
+            cloud_coverage: cloudCoverage,
+            roots: roots
+        )
+    }
+
+    private func materializeRoot(
+        _ root: String,
+        deadline: Date,
+        id: UUID,
+        progress: (_ phase: String, _ result: CloudMaterializationRootResult, _ shouldLog: Bool) -> Void
+    ) -> CloudMaterializationRootResult {
+        let rootURL = URL(fileURLWithPath: root)
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory)
+        guard exists else {
+            let result = CloudMaterializationRootResult(
+                root: root,
+                exists: false,
+                directories_seen: 0,
+                files_seen: 0,
+                files_read: 0,
+                failures: 0,
+                aborted: false,
+                timed_out: false,
+                last_error: nil
+            )
+            progress("missing root", result, true)
+            return result
+        }
+
+        var directoriesSeen = isDirectory.boolValue ? 1 : 0
+        var filesSeen = 0
+        var filesRead = 0
+        var failures = 0
+        var datalessPlaceholders = 0
+        var datalessPaths = Set<String>()
+        var datalessSamplePaths: [String] = []
+        var readFailures = 0
+        var readFailureSamplePaths: [String] = []
+        var aborted = false
+        var timedOut = false
+        var lastError: String?
+        var lastStatusProgressAt = Date.distantPast
+        var lastLogProgressAt = Date.distantPast
+        var lastProgressUnits = 0
+        let isICloudRoot = root.contains("/Library/Mobile Documents")
+
+        func rememberSample(_ path: String, in samples: inout [String]) {
+            if samples.count < 5 {
+                samples.append(path)
+            }
+        }
+
+        func recordReadFailure(_ message: String, samplePath: String? = nil) {
+            readFailures += 1
+            failures = readFailures
+            lastError = message
+            rememberSample(samplePath ?? message, in: &readFailureSamplePaths)
+        }
+
+        func currentResult() -> CloudMaterializationRootResult {
+            CloudMaterializationRootResult(
+                root: root,
+                exists: true,
+                directories_seen: directoriesSeen,
+                files_seen: filesSeen,
+                files_read: filesRead,
+                dataless_placeholders: datalessPlaceholders,
+                read_failures: readFailures,
+                failures: failures,
+                aborted: aborted,
+                timed_out: timedOut,
+                last_error: lastError,
+                dataless_sample_paths: datalessSamplePaths,
+                read_failure_sample_paths: readFailureSamplePaths
+            )
+        }
+
+        func publishProgress(_ phase: String, forceLog: Bool = false) {
+            let now = Date()
+            let units = directoriesSeen + filesSeen
+            let shouldUpdateStatus = forceLog
+                || units - lastProgressUnits >= 500
+                || now.timeIntervalSince(lastStatusProgressAt) >= 10
+            guard shouldUpdateStatus else {
+                return
+            }
+
+            let shouldLog = forceLog || now.timeIntervalSince(lastLogProgressAt) >= 60
+            lastStatusProgressAt = now
+            lastProgressUnits = units
+            if shouldLog {
+                lastLogProgressAt = now
+            }
+            progress(phase, currentResult(), shouldLog)
+        }
+
+        progress("root starting", currentResult(), true)
+
+        if isICloudRoot,
+           FileManager.default.isExecutableFile(atPath: "/usr/bin/brctl"),
+           Date() < deadline {
+            let timeout = min(max(Int(deadline.timeIntervalSinceNow), 1), 900)
+            progress("icloud download", currentResult(), true)
+            do {
+                let result = try CommandRunner.run(
+                    "/usr/bin/brctl",
+                    arguments: ["download", root],
+                    environment: childEnvironment(),
+                    timeoutSeconds: timeout
+                )
+                if result.timedOut {
+                    timedOut = true
+                    lastError = "brctl download timed out for \(root)"
+                } else if result.status != 0 {
+                    lastError = sanitizedCommandError(result.stderr)
+                }
+            } catch {
+                lastError = "unable to run brctl download for \(root): \(error.localizedDescription)"
+            }
+            progress("icloud download complete", currentResult(), true)
+        }
+
+        if timedOut {
+            let result = currentResult()
+            progress("timed out", result, true)
+            return result
+        }
+
+        publishProgress("reading files", forceLog: true)
+
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: keys,
+            options: [],
+            errorHandler: { url, error in
+                recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
+                return true
+            }
+        ) else {
+            recordReadFailure("unable to enumerate \(root)", samplePath: root)
+            let result = CloudMaterializationRootResult(
+                root: root,
+                exists: true,
+                directories_seen: directoriesSeen,
+                files_seen: filesSeen,
+                files_read: filesRead,
+                dataless_placeholders: datalessPlaceholders,
+                read_failures: readFailures,
+                failures: failures,
+                aborted: false,
+                timed_out: false,
+                last_error: lastError,
+                dataless_sample_paths: datalessSamplePaths,
+                read_failure_sample_paths: readFailureSamplePaths
+            )
+            progress("enumeration failed", result, true)
+            return result
+        }
+
+        for case let url as URL in enumerator {
+            if Date() >= deadline {
+                timedOut = true
+                lastError = "cloud materialization timed out while reading \(root)"
+                break
+            }
+
+            if let reason = materializationAbortReason(for: id) {
+                aborted = true
+                lastError = reason
+                break
+            }
+
+            do {
+                let values = try url.resourceValues(forKeys: Set(keys))
+                if values.isDirectory == true {
+                    directoriesSeen += 1
+                    publishProgress("reading files")
+                    continue
+                }
+
+                guard values.isRegularFile == true else {
+                    publishProgress("reading files")
+                    continue
+                }
+
+                filesSeen += 1
+                if FileFlags.isDataless(url) {
+                    datalessPlaceholders += 1
+                    datalessPaths.insert(url.path)
+                    rememberSample(url.path, in: &datalessSamplePaths)
+                    if isICloudRoot {
+                        do {
+                            try FileManager.default.startDownloadingUbiquitousItem(at: url)
+                        } catch {
+                            lastError = "\(url.path): unable to request iCloud download: \(error.localizedDescription)"
+                        }
+                    }
+                    publishProgress("classifying placeholders")
+                    continue
+                }
+
+                let handle = try FileHandle(forReadingFrom: url)
+                _ = try handle.read(upToCount: 1)
+                try? handle.close()
+                filesRead += 1
+            } catch {
+                recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
+            }
+            publishProgress("reading files")
+        }
+
+        if isICloudRoot, !datalessPaths.isEmpty, Date() < deadline, !aborted, !timedOut {
+            publishProgress("waiting for iCloud downloads", forceLog: true)
+            let waitSeconds = min(10.0, max(0.0, deadline.timeIntervalSinceNow))
+            if waitSeconds > 0 {
+                Thread.sleep(forTimeInterval: waitSeconds)
+            }
+
+            publishProgress("rescanning placeholders", forceLog: true)
+            for path in Array(datalessPaths).sorted() {
+                if Date() >= deadline {
+                    timedOut = true
+                    lastError = "cloud materialization timed out while rescanning placeholders in \(root)"
+                    break
+                }
+
+                if let reason = materializationAbortReason(for: id) {
+                    aborted = true
+                    lastError = reason
+                    break
+                }
+
+                let url = URL(fileURLWithPath: path)
+                guard !FileFlags.isDataless(url) else {
+                    publishProgress("rescanning placeholders")
+                    continue
+                }
+
+                do {
+                    let handle = try FileHandle(forReadingFrom: url)
+                    _ = try handle.read(upToCount: 1)
+                    try? handle.close()
+                    filesRead += 1
+                    datalessPaths.remove(path)
+                    datalessPlaceholders -= 1
+                } catch {
+                    recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
+                }
+                publishProgress("rescanning placeholders")
+            }
+
+            datalessSamplePaths = Array(datalessPaths.sorted().prefix(5))
+        }
+
+        let result = currentResult()
+        progress(timedOut ? "timed out" : (aborted ? "aborted" : "root complete"), result, true)
+        return result
+    }
+
+    private func publishCloudMaterializationProgress(
+        id: UUID,
+        startedAt: Date,
+        roots: [CloudMaterializationRootResult],
+        currentRoot: String?,
+        currentPhase: String,
+        logMessage: String? = nil
+    ) {
+        let totals = materializationTotals(roots: roots)
+        let snapshot = CloudMaterializationSnapshot(
+            enabled: Config.cloudMaterializationEnabled,
+            started_at: DateFormatters.iso.string(from: startedAt),
+            finished_at: nil,
+            completed: false,
+            aborted: false,
+            reason: "running",
+            current_root: currentRoot,
+            current_phase: currentPhase,
+            total_directories_seen: totals.directories,
+            total_files_seen: totals.filesSeen,
+            total_files_read: totals.filesRead,
+            total_failures: totals.failures,
+            total_dataless_placeholders: totals.dataless,
+            total_read_failures: totals.readFailures,
+            cloud_coverage: "running",
+            roots: roots
+        )
+
+        DispatchQueue.main.async {
+            guard self.activeMaterializationID == id else {
+                return
+            }
+
+            self.cloudMaterialization = snapshot
+            if let logMessage {
+                self.appendLog(logMessage)
+            }
+            self.writeStatus()
+        }
+    }
+
+    private func cloudMaterializationLogMessage(
+        phase: String,
+        result: CloudMaterializationRootResult
+    ) -> String {
+        var message = "cloud materialization progress phase=\(phase) root=\"\(result.root)\" directories_seen=\(result.directories_seen) files_seen=\(result.files_seen) files_read=\(result.files_read) dataless_placeholders=\(result.dataless_placeholders) read_failures=\(result.read_failures)"
+        if let lastError = result.last_error, !lastError.isEmpty {
+            message += " last_error=\"\(lastError)\""
+        }
+        return message
+    }
+
+    private func materializationAbortReason(for id: UUID) -> String? {
+        var reason: String?
+        DispatchQueue.main.sync {
+            guard activeMaterializationID == id else {
+                reason = "cloud materialization cancelled"
+                return
+            }
+
+            let now = Date()
+            if now.timeIntervalSince(lastMaterializationNetworkCheckAt) >= TimeInterval(Config.networkCheckIntervalSeconds) {
+                lastMaterializationNetworkCheckAt = now
+                network = currentNetworkSnapshot()
+            }
+            if Config.cloudMaterializationRequiresAllowedNetwork && !network.allowed {
+                reason = "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'"
+            }
+        }
+        return reason
+    }
+
+    private func abortedMaterializationSnapshot(reason: String) -> CloudMaterializationSnapshot {
+        CloudMaterializationSnapshot(
+            enabled: Config.cloudMaterializationEnabled,
+            started_at: cloudMaterialization.started_at,
+            finished_at: DateFormatters.iso.string(from: Date()),
+            completed: false,
+            aborted: true,
+            reason: reason,
+            current_root: nil,
+            current_phase: nil,
+            total_directories_seen: 0,
+            total_files_seen: 0,
+            total_files_read: 0,
+            total_failures: 0,
+            total_dataless_placeholders: 0,
+            total_read_failures: 0,
+            cloud_coverage: "blocked",
+            roots: []
+        )
+    }
+
+    private func materializationTotals(
+        roots: [CloudMaterializationRootResult]
+    ) -> (directories: Int, filesSeen: Int, filesRead: Int, failures: Int, dataless: Int, readFailures: Int) {
+        roots.reduce((directories: 0, filesSeen: 0, filesRead: 0, failures: 0, dataless: 0, readFailures: 0)) { partial, root in
+            (
+                directories: partial.directories + root.directories_seen,
+                filesSeen: partial.filesSeen + root.files_seen,
+                filesRead: partial.filesRead + root.files_read,
+                failures: partial.failures + root.failures,
+                dataless: partial.dataless + root.dataless_placeholders,
+                readFailures: partial.readFailures + root.read_failures
+            )
+        }
+    }
+
     func stopBackup(reason: String = "manual stop") {
+        if activeMaterializationID != nil {
+            activeMaterializationID = nil
+            lastAbortReason = reason
+            appendLog("abort: \(reason); stopping cloud materialization")
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
         guard let process = activeProcess else {
             return
         }
@@ -614,6 +1598,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.logFile))
     }
 
+    func openFullDiskAccessSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     func copyDebugStatus() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -627,7 +1617,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     func quit() {
-        if activeProcess != nil {
+        if activeProcess != nil || activeMaterializationID != nil {
             stopBackup(reason: "monitor quitting")
         }
         appendLog("monitor quitting")
@@ -638,12 +1628,20 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         switch state {
         case .ready:
             return "Ready"
+        case .preparingCloudFiles:
+            return "Preparing Cloud Files"
         case .syncing:
             return "Syncing"
         case .paused:
             return "Paused"
         case .needsPermission:
             return "Needs Permission"
+        case .needsFullDiskAccess:
+            return "Needs Full Disk Access"
+        case .cloudDownloadBlocked:
+            return "Cloud Download Blocked"
+        case .cloudPartial:
+            return "Cloud Partial"
         case .failed:
             return "Failed"
         case .disabled:
@@ -655,23 +1653,27 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         switch state {
         case .ready:
             return "checkmark.circle"
+        case .preparingCloudFiles:
+            return "icloud.and.arrow.down"
         case .syncing:
             return "arrow.triangle.2.circlepath.circle"
         case .paused:
             return "pause.circle"
-        case .needsPermission, .failed:
+        case .needsPermission, .needsFullDiskAccess, .cloudDownloadBlocked, .failed:
             return "exclamationmark.triangle"
+        case .cloudPartial:
+            return "icloud.slash"
         case .disabled:
             return "wifi.slash"
         }
     }
 
     var canStartManual: Bool {
-        activeProcess == nil && network.allowed
+        activeProcess == nil && activeMaterializationID == nil && network.allowed
     }
 
     var canStopManual: Bool {
-        activeProcess != nil
+        activeProcess != nil || activeMaterializationID != nil
     }
 
     var ssidText: String {
@@ -699,8 +1701,48 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return String(activePID)
     }
 
+    var cloudMaterializationText: String {
+        if activeMaterializationID != nil {
+            let phase = cloudMaterialization.current_phase ?? "running"
+            let datalessPlaceholders = cloudMaterialization.total_dataless_placeholders ?? 0
+            if let root = cloudMaterialization.current_root {
+                let rootName = URL(fileURLWithPath: root).lastPathComponent
+                return "\(rootName): \(phase), \(cloudMaterialization.total_files_read)/\(cloudMaterialization.total_files_seen) files, \(datalessPlaceholders) placeholders"
+            }
+            return phase
+        }
+
+        guard Config.cloudMaterializationEnabled else {
+            return "disabled"
+        }
+
+        if cloudMaterialization.completed {
+            let datalessPlaceholders = cloudMaterialization.total_dataless_placeholders ?? 0
+            let readFailures = cloudMaterialization.total_read_failures ?? cloudMaterialization.total_failures
+            if datalessPlaceholders > 0 || readFailures > 0 {
+                return "partial: \(datalessPlaceholders) placeholders, \(readFailures) read failures"
+            }
+            return "complete: \(cloudMaterialization.total_files_read) files checked"
+        }
+
+        if let reason = cloudMaterialization.reason {
+            return reason
+        }
+
+        return "not run"
+    }
+
     private func tick() {
-        refreshNetwork(reason: "timer", shouldEvaluateSchedule: true)
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastNetworkCheckAt)
+        if elapsed >= TimeInterval(Config.networkCheckIntervalSeconds) {
+            refreshNetwork(reason: "timer", shouldEvaluateSchedule: true)
+        }
+
+        if activeMaterializationID != nil && Config.cloudMaterializationRequiresAllowedNetwork && !network.allowed {
+            stopBackup(reason: "network no longer allowed during cloud materialization: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
+            return
+        }
 
         if let process = activeProcess {
             if !process.isRunning {
@@ -708,19 +1750,16 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 return
             }
 
-            let elapsed = Date().timeIntervalSince(lastNetworkCheckAt)
-            if elapsed >= TimeInterval(Config.networkCheckIntervalSeconds) {
-                lastNetworkCheckAt = Date()
-                if !network.allowed {
-                    stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
-                }
+            if !network.allowed {
+                stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
             }
         }
     }
 
     private func refreshNetwork(reason: String, shouldEvaluateSchedule: Bool) {
         let wasAllowed = network.allowed
-        network = NetworkPolicy.current(isExpensive: pathIsExpensive, isConstrained: pathIsConstrained)
+        network = currentNetworkSnapshot()
+        lastNetworkCheckAt = Date()
         let becameAllowed = !wasAllowed && network.allowed
 
         if shouldEvaluateSchedule {
@@ -731,8 +1770,19 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         writeStatus()
     }
 
+    private func currentNetworkSnapshot() -> NetworkSnapshot {
+        NetworkPolicy.current(
+            isExpensive: pathIsExpensive,
+            isConstrained: pathIsConstrained,
+            authorization: locationManager.authorizationStatus
+        )
+    }
+
     private func evaluateSchedule(becameAllowed: Bool, reason: String) {
         guard activeProcess == nil else {
+            return
+        }
+        guard activeMaterializationID == nil else {
             return
         }
 
@@ -740,6 +1790,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if network.allowed {
             if lastSuccessAt == nil && (becameAllowed || reason == "startup") {
+                if let nextRunAt,
+                   now < nextRunAt,
+                   lastFailureAt != nil {
+                    return
+                }
+
                 startBackup(trigger: "first-allowed-network")
                 return
             }
@@ -763,6 +1819,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private func handleBackupExit(status: Int32) {
         appendLog("kopia backup exit observed status=\(status)")
         activePipe?.fileHandleForReading.readabilityHandler = nil
+        flushKopiaOutputSummary()
+        appendDataToFile(
+            "\(DateFormatters.log.string(from: Date())) raw kopia output finished status=\(status)\n".data(using: .utf8) ?? Data(),
+            path: Config.rawKopiaLogFile
+        )
         activePipe = nil
         activeProcess = nil
         activePID = nil
@@ -775,9 +1836,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             stopReason = nil
         } else if status == 0 {
             lastSuccessAt = now
+            lastSuccessCloudCoverage = cloudMaterialization.cloud_coverage ?? inferredCloudCoverage(cloudMaterialization)
             lastFailureAt = nil
             lastFailure = nil
             lastAbortReason = nil
+            fullDiskAccessBlocked = false
+            cloudDownloadBlocked = false
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
             appendLog("success: kopia snapshot complete")
         } else {
@@ -792,6 +1856,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private func recordFailure(_ message: String) {
         lastFailureAt = Date()
         lastFailure = message
+        fullDiskAccessBlocked = false
+        cloudDownloadBlocked = false
         nextRunAt = Date().addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
         appendLog("failure: \(message)")
         updateDerivedState()
@@ -801,6 +1867,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private func recordPreflightFailure(_ message: String) {
         lastFailureAt = Date()
         lastFailure = message
+        fullDiskAccessBlocked = false
+        cloudDownloadBlocked = false
         nextRunAt = Date().addingTimeInterval(TimeInterval(Config.preflightFailureRetrySeconds))
         appendLog("failure: \(message); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
         updateDerivedState()
@@ -827,14 +1895,35 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func updateDerivedState() {
+        if activeMaterializationID != nil {
+            state = .preparingCloudFiles
+            return
+        }
+
         if activeProcess != nil {
             state = .syncing
             return
         }
 
+        if fullDiskAccessBlocked {
+            state = .needsFullDiskAccess
+            return
+        }
+
+        if cloudDownloadBlocked {
+            state = .cloudDownloadBlocked
+            return
+        }
+
         switch network.state {
         case "allowed":
-            state = lastFailureAt == nil ? .ready : .failed
+            if lastFailureAt != nil {
+                state = .failed
+            } else if lastSuccessCloudCoverage == "partial" {
+                state = .cloudPartial
+            } else {
+                state = .ready
+            }
         case "denied":
             state = .paused
         case "missing":
@@ -844,15 +1933,36 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
+    private func inferredCloudCoverage(_ snapshot: CloudMaterializationSnapshot) -> String {
+        let datalessPlaceholders = snapshot.total_dataless_placeholders ?? 0
+        let readFailures = snapshot.total_read_failures ?? snapshot.total_failures
+        if snapshot.completed && datalessPlaceholders == 0 && readFailures == 0 {
+            return "complete"
+        }
+        if snapshot.completed {
+            return "partial"
+        }
+        return "blocked"
+    }
+
     private func loadPersistedStatus() {
         if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)),
            let status = try? JSONDecoder().decode(StatusSnapshot.self, from: data) {
             lastStartAt = parseDate(status.last_start_at)
             lastSuccessAt = parseDate(status.last_success_at)
+            lastSuccessCloudCoverage = status.last_success_cloud_coverage
             lastFailureAt = parseDate(status.last_failure_at)
             lastFailure = status.last_failure
             lastAbortReason = status.last_abort_reason
             nextRunAt = parseDate(status.next_run_at)
+
+            if let lastFailure,
+               lastFailure.contains("cloud materialization read failures") {
+                self.lastFailure = nil
+                lastFailureAt = nil
+                lastAbortReason = nil
+                nextRunAt = nil
+            }
         }
 
         if lastSuccessAt == nil, let seeded = seedLastSuccessFromLog() {
@@ -897,6 +2007,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         ConfigSummary(
             app_name: Config.appName,
             backup_source: Config.backupSource,
+            backup_ignore_file: Config.backupIgnoreFile,
+            backup_ignore_patterns: Config.backupIgnorePatterns,
+            protected_data_probe_paths: Config.protectedDataProbePaths,
+            cloud_materialization_roots: Config.cloudMaterializationRoots,
+            cloud_materialization_enabled: Config.cloudMaterializationEnabled,
+            cloud_materialization_requires_allowed_network: Config.cloudMaterializationRequiresAllowedNetwork,
+            cloud_materialization_timeout_seconds: Config.cloudMaterializationTimeoutSeconds,
+            cloud_materialization_retry_seconds: Config.cloudMaterializationRetrySeconds,
             run_interval_seconds: Config.runIntervalSeconds,
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
             preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
@@ -905,6 +2023,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             app_bundle_identifier: Config.bundleIdentifier,
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
+            raw_kopia_log_file: Config.rawKopiaLogFile,
             status_file: Config.statusFile
         )
     }
@@ -923,9 +2042,13 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             active_pid: activePID,
             last_start_at: dateString(lastStartAt),
             last_success_at: dateString(lastSuccessAt),
+            last_success_cloud_coverage: lastSuccessCloudCoverage,
             last_failure_at: dateString(lastFailureAt),
             last_failure: lastFailure,
             last_abort_reason: lastAbortReason,
+            protected_data_probe_results: protectedDataProbeResults,
+            cloud_materialization: cloudMaterialization,
+            kopia_ran_after_materialization: kopiaRanAfterMaterialization,
             config_summary: configSummary()
         )
     }
@@ -955,13 +2078,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func appendDataToLog(_ data: Data) {
-        let url = URL(fileURLWithPath: Config.logFile)
+        appendDataToFile(data, path: Config.logFile)
+    }
+
+    private func appendDataToFile(_ data: Data, path: String) {
+        let url = URL(fileURLWithPath: path)
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if !FileManager.default.fileExists(atPath: Config.logFile) {
-            FileManager.default.createFile(atPath: Config.logFile, contents: nil)
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
         }
         guard let handle = try? FileHandle(forWritingTo: url) else {
             return
@@ -971,6 +2098,64 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
         _ = try? handle.seekToEnd()
         _ = try? handle.write(contentsOf: data)
+    }
+
+    private func handleKopiaOutputData(_ data: Data) {
+        appendDataToFile(data, path: Config.rawKopiaLogFile)
+        guard let text = String(data: data, encoding: .utf8) else {
+            return
+        }
+        DispatchQueue.main.async {
+            self.processKopiaOutputText(text)
+        }
+    }
+
+    private func processKopiaOutputText(_ text: String) {
+        kopiaOutputBuffer += text.replacingOccurrences(of: "\r", with: "\n")
+        while let newlineIndex = kopiaOutputBuffer.firstIndex(of: "\n") {
+            let line = String(kopiaOutputBuffer[..<newlineIndex])
+            kopiaOutputBuffer.removeSubrange(...newlineIndex)
+            processKopiaOutputLine(line)
+        }
+    }
+
+    private func flushKopiaOutputSummary() {
+        if !kopiaOutputBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            processKopiaOutputLine(kopiaOutputBuffer)
+            kopiaOutputBuffer = ""
+        }
+        if kopiaSuppressedDatalessReadErrors > 0 {
+            appendLog("kopia dataless placeholder read errors suppressed total=\(kopiaSuppressedDatalessReadErrors) raw_log=\"\(Config.rawKopiaLogFile)\"")
+        }
+        if kopiaOtherOutputReadErrors > 0 {
+            appendLog("kopia non-placeholder processing errors total=\(kopiaOtherOutputReadErrors)")
+        }
+    }
+
+    private func processKopiaOutputLine(_ line: String) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+
+        if isKnownDatalessKopiaReadError(trimmed) {
+            kopiaSuppressedDatalessReadErrors += 1
+            if kopiaSuppressedDatalessReadErrors == 1 || kopiaSuppressedDatalessReadErrors % 500 == 0 {
+                appendLog("kopia dataless placeholder read errors suppressed count=\(kopiaSuppressedDatalessReadErrors) raw_log=\"\(Config.rawKopiaLogFile)\"")
+            }
+            return
+        }
+
+        if trimmed.contains("Error when processing") {
+            kopiaOtherOutputReadErrors += 1
+        }
+        appendLog(trimmed)
+    }
+
+    private func isKnownDatalessKopiaReadError(_ line: String) -> Bool {
+        line.contains("Error when processing")
+            && line.contains("resource deadlock avoided")
+            && line.contains(": read ")
     }
 }
 
@@ -1083,7 +2268,11 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
     }
 
     private func printNetworkJSON() {
-        let network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+        let network = NetworkPolicy.current(
+            isExpensive: false,
+            isConstrained: false,
+            authorization: manager.authorizationStatus
+        )
         printEncoded(network)
     }
 
@@ -1094,7 +2283,11 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             return
         }
 
-        let network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+        let network = NetworkPolicy.current(
+            isExpensive: false,
+            isConstrained: false,
+            authorization: manager.authorizationStatus
+        )
         let state: BackupState
         switch network.state {
         case "allowed":
@@ -1119,12 +2312,24 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             active_pid: nil,
             last_start_at: nil,
             last_success_at: nil,
+            last_success_cloud_coverage: nil,
             last_failure_at: nil,
             last_failure: nil,
             last_abort_reason: nil,
+            protected_data_probe_results: [],
+            cloud_materialization: CloudMaterializationSnapshot.empty(),
+            kopia_ran_after_materialization: false,
             config_summary: ConfigSummary(
                 app_name: Config.appName,
                 backup_source: Config.backupSource,
+                backup_ignore_file: Config.backupIgnoreFile,
+                backup_ignore_patterns: Config.backupIgnorePatterns,
+                protected_data_probe_paths: Config.protectedDataProbePaths,
+                cloud_materialization_roots: Config.cloudMaterializationRoots,
+                cloud_materialization_enabled: Config.cloudMaterializationEnabled,
+                cloud_materialization_requires_allowed_network: Config.cloudMaterializationRequiresAllowedNetwork,
+                cloud_materialization_timeout_seconds: Config.cloudMaterializationTimeoutSeconds,
+                cloud_materialization_retry_seconds: Config.cloudMaterializationRetrySeconds,
                 run_interval_seconds: Config.runIntervalSeconds,
                 network_check_interval_seconds: Config.networkCheckIntervalSeconds,
                 preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
@@ -1133,6 +2338,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 app_bundle_identifier: Config.bundleIdentifier,
                 monitor_launchd_label: Config.monitorLaunchdLabel,
                 log_file: Config.logFile,
+                raw_kopia_log_file: Config.rawKopiaLogFile,
                 status_file: Config.statusFile
             )
         )
@@ -1200,12 +2406,24 @@ func printStatusJSONAndExit() -> Never {
         active_pid: nil,
         last_start_at: nil,
         last_success_at: nil,
+        last_success_cloud_coverage: nil,
         last_failure_at: nil,
         last_failure: nil,
         last_abort_reason: nil,
+        protected_data_probe_results: [],
+        cloud_materialization: CloudMaterializationSnapshot.empty(),
+        kopia_ran_after_materialization: false,
         config_summary: ConfigSummary(
             app_name: Config.appName,
             backup_source: Config.backupSource,
+            backup_ignore_file: Config.backupIgnoreFile,
+            backup_ignore_patterns: Config.backupIgnorePatterns,
+            protected_data_probe_paths: Config.protectedDataProbePaths,
+            cloud_materialization_roots: Config.cloudMaterializationRoots,
+            cloud_materialization_enabled: Config.cloudMaterializationEnabled,
+            cloud_materialization_requires_allowed_network: Config.cloudMaterializationRequiresAllowedNetwork,
+            cloud_materialization_timeout_seconds: Config.cloudMaterializationTimeoutSeconds,
+            cloud_materialization_retry_seconds: Config.cloudMaterializationRetrySeconds,
             run_interval_seconds: Config.runIntervalSeconds,
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
             preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
@@ -1214,6 +2432,7 @@ func printStatusJSONAndExit() -> Never {
             app_bundle_identifier: Config.bundleIdentifier,
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
+            raw_kopia_log_file: Config.rawKopiaLogFile,
             status_file: Config.statusFile
         )
     )
@@ -1259,7 +2478,7 @@ struct KopiaBackupMonitorApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra(Config.appName, systemImage: monitor.menuSystemImage) {
+        MenuBarExtra {
             Text(Config.appName)
                 .font(.headline)
             Text(monitor.menuTitle)
@@ -1273,6 +2492,7 @@ struct KopiaBackupMonitorApp: App {
             Text("Last success: \(monitor.lastSuccessText)")
             Text("Next run: \(monitor.nextRunText)")
             Text("Active PID: \(monitor.activePIDText)")
+            Text("Cloud prep: \(monitor.cloudMaterializationText)")
             if let failure = monitor.lastFailure {
                 Divider()
                 Text("Last failure: \(failure)")
@@ -1295,6 +2515,9 @@ struct KopiaBackupMonitorApp: App {
             Button("Grant Wi-Fi Permission") {
                 monitor.requestLocationPermission()
             }
+            Button("Open Full Disk Access") {
+                monitor.openFullDiskAccessSettings()
+            }
             Divider()
             Button("Open Log") {
                 monitor.openLog()
@@ -1306,6 +2529,8 @@ struct KopiaBackupMonitorApp: App {
             Button("Quit Monitor") {
                 monitor.quit()
             }
+        } label: {
+            Label(Config.appName, systemImage: monitor.menuSystemImage)
         }
     }
 }
