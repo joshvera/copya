@@ -4,18 +4,27 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{{ launchd_label }}</string>
+  <string>{{ monitor_launchd_label }}</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>{{ runner_path }}</string>
+    <string>{{ app_executable_path }}</string>
   </array>
 
   <key>RunAtLoad</key>
   <true/>
 
-  <key>StartInterval</key>
-  <integer>{{ run_interval_seconds }}</integer>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 
   <key>StandardOutPath</key>
   <string>{{ log_file }}</string>

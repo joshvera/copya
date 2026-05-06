@@ -1,8 +1,11 @@
 # macOS Kopia Backups with Pyinfra
 
-This deploy installs native macOS Kopia with Homebrew, renders a
-network-gated backup runner, and schedules it as a per-user launchd
-LaunchAgent. The B2 repository and Kopia password stay outside git.
+This deploy installs native macOS Kopia with Homebrew and manages a signed
+menu bar app, `COPYA.app`, as the backup orchestrator. The app owns Wi-Fi
+policy, scheduling, process control, status, and manual actions.
+launchd only starts the monitor app at login and relaunches it after crashes.
+
+The B2 repository and Kopia password stay outside git.
 
 ## Install uv
 
@@ -30,59 +33,24 @@ The default reference is configured in `group_data/all.py`:
 op://Private/Kopia/password
 ```
 
-If your vault, item, or field names differ, update `kopia_password_ref` in
-`group_data/all.py`.
+The app reads this value with `op read` only when starting a backup, then
+passes it to the Kopia child process as `KOPIA_PASSWORD`. The password is not
+written to the status file, logs, or git.
 
-The deploy installs `1password-cli` with Homebrew. Before relying on launchd,
-verify that the `vera` user can read the secret non-interactively:
+Before relying on unattended runs, verify that `op read` works in the user
+session without manual input:
 
 ```bash
 op read "$(python3 - <<'PY'
 from group_data import all
 print(all.kopia_password_ref)
 PY
-)"
+)" >/dev/null
 ```
 
-For unattended launchd runs, `op read` must work in the user session without
-manual input at backup time. 1Password recommends service accounts for scripts
-that need scoped automated access. If you use a service account, store the
-Kopia password in a vault the service account can access, not the built-in
-Private vault, and update `kopia_password_ref` accordingly.
-
-The optional env file remains available for non-secret overrides, such as a
-machine-local secret reference:
-
-```bash
-mkdir -p ~/.config/kopia-backup
-chmod 700 ~/.config/kopia-backup
-printf 'KOPIA_PASSWORD_REF=%s\n' 'op://Private/Kopia/password' > ~/.config/kopia-backup/env
-chmod 600 ~/.config/kopia-backup/env
-```
-
-## Grant Wi-Fi SSID Permission
-
-The deploy builds a small native macOS helper at:
-
-```bash
-/Users/vera/.local/kopia-backup/Kopia\ WiFi\ SSID\ Helper.app/Contents/MacOS/kopia-wifi-ssid
-```
-
-The helper uses CoreWLAN to read the current SSID. On modern macOS, SSID access
-is protected as location-adjacent data, so grant Location Services permission
-from an interactive session after deploying or rebuilding the helper:
-
-```bash
-"/Users/vera/.local/kopia-backup/Kopia WiFi SSID Helper.app/Contents/MacOS/kopia-wifi-ssid" --request-location
-"/Users/vera/.local/kopia-backup/Kopia WiFi SSID Helper.app/Contents/MacOS/kopia-wifi-ssid" --ssid en0
-/Users/vera/.local/kopia-backup/kopia-safe-run.sh --check-network
-```
-
-If macOS does not prompt, open System Settings -> Privacy & Security ->
-Location Services and allow `Kopia WiFi SSID Helper`. Until this helper can
-return the exact SSID, the runner treats `<redacted>` as unsafe and skips.
-Because the helper is locally built and ad-hoc signed, rebuilding it can reset
-the macOS privacy grant; rerun `--request-location` after changing the helper.
+For fully unattended launchd runs, `op read` must not require interaction at
+backup time. If needed, use a 1Password service account with access to a
+non-Private vault and update `kopia_password_ref`.
 
 ## Deploy
 
@@ -94,92 +62,106 @@ uv run pyinfra @local deploy.py --dry
 uv run pyinfra @local deploy.py
 ```
 
+The deploy:
+
+- installs `kopia` and `1password-cli`;
+- builds and signs `/Users/vera/.local/kopia-backup/COPYA.app`;
+- removes the legacy `com.vera.kopia.backup` runner LaunchAgent;
+- installs and bootstraps `com.vera.kopia.monitor`.
+
 The configured macOS user and home directory must already exist. This deploy
-will not create `/Users/vera`; macOS should create home directories through the
-normal user account/login flow.
+will not create `/Users/vera`.
 
-If you run the deploy as `vera`, sudo is not needed for the home-directory
-files. If you run it from another admin account and `/Users/vera` already
-exists, opt into sudo only for the user-home and launchd operations:
+## Signing
 
-```bash
-uv run pyinfra @local deploy.py --data use_sudo=true
+The local app is signed with the identity configured in `group_data/all.py`:
+
+```text
+Apple Development: Joshua Vera (HBBYKPXNDM)
 ```
 
-The deploy uses modern per-user launchd commands directly:
-`bootstrap`, `bootout`, `enable`, and `kickstart` against `gui/$(id -u)`.
-
-## Test Manually
-
-Run the generated runner directly:
+Verify the installed app signature:
 
 ```bash
-/Users/vera/.local/kopia-backup/kopia-safe-run.sh
-tail -n 100 /Users/vera/Library/Logs/kopia-backup.log
+codesign --verify --deep --strict "/Users/vera/.local/kopia-backup/COPYA.app"
 ```
 
-The runner skips backups when no SSID is detected, or when the current SSID
-is `Freeside` or `cerise`. It also treats macOS SSID redaction as a visibility
-failure and skips until the runner can read the exact SSID.
+Developer ID notarization is intentionally not part of this local setup yet.
 
-The runner checks the network before starting Kopia and every
-`network_check_interval_seconds` while Kopia is running. If Wi-Fi changes to
-`Freeside`, `cerise`, missing, or redacted during a backup, the runner stops
-the active Kopia child and exits cleanly. Switching back to an allowed network
-does not immediately start a new backup by itself; wait for the next launchd
-interval or run `launchctl kickstart -k gui/$(id -u)/com.vera.kopia.backup`.
+## Grant Wi-Fi Permission
 
-Check what the runner sees without starting a backup:
+The app uses CoreWLAN and Core Location permission to read the exact SSID.
+Grant Location Services from an interactive session:
 
 ```bash
-/Users/vera/.local/kopia-backup/kopia-safe-run.sh --check-network
+"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --request-location
+"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
 ```
 
-Modern macOS privacy controls can hide SSID values from command-line tools. If
-the check reports `state=redacted`, fix SSID visibility for the user/session
-before relying on unattended backups. Apple documents SSID access restrictions
-for `CNCopyCurrentNetworkInfo` here:
-<https://developer.apple.com/documentation/systemconfiguration/cncopycurrentnetworkinfo>.
+If macOS does not prompt, open System Settings -> Privacy & Security ->
+Location Services and allow `COPYA`.
 
-## Check launchd Status
+SSID redaction, missing SSID, or missing Location permission is a degraded
+state and blocks backups. This is required because the policy is exact SSID
+denylist matching: `Freeside` and `cerise` are denied; all exact non-denied
+SSIDs, including `MANAWA`, are allowed.
+
+## Monitor and Control
+
+The menu bar app shows:
+
+- current state: Ready, Syncing, Paused, Needs Permission, Failed, or Disabled;
+- current SSID and policy reason;
+- next scheduled run;
+- last successful backup;
+- active Kopia PID when syncing;
+- last failure or abort reason.
+
+Menu actions include Start Backup Now, Stop Backup, Check Network, Grant Wi-Fi
+Permission, Open Log, Copy Debug Status, and Quit Monitor.
+
+The app writes status JSON here:
 
 ```bash
-launchctl print gui/$(id -u)/com.vera.kopia.backup
+/Users/vera/.local/kopia-backup/status.json
 ```
 
-Useful follow-up commands:
+Useful debug commands:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.vera.kopia.backup
-pgrep -fl 'kopia-safe-run|kopia snapshot create'
+"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --status-json
+"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
+launchctl print gui/$(id -u)/com.vera.kopia.monitor
+pgrep -fl 'kopia-backup-monitor|kopia snapshot create'
 tail -f /Users/vera/Library/Logs/kopia-backup.log
 ```
 
-To stop a running backup and unload the LaunchAgent:
+## Scheduling Behavior
+
+The app starts Kopia directly:
 
 ```bash
-launchctl bootout gui/$(id -u) /Users/vera/Library/LaunchAgents/com.vera.kopia.backup.plist || true
-pgrep -fl 'kopia-safe-run|kopia snapshot create'
+kopia snapshot create --no-progress /Users/vera
 ```
 
-## Log Audit
+Only one Kopia child process may run at a time.
 
-The runner writes start, skip, network-abort, success, and failure messages to
-`/Users/vera/Library/Logs/kopia-backup.log`. Kopia is run with `--no-progress`
-so the log stays readable.
+Scheduling rules:
 
-Useful audit commands:
+- if no backup has ever completed and the network becomes allowed, start one
+  immediately;
+- after a successful backup, schedule the next run at
+  `last_success_at + run_interval_seconds`;
+- if a scheduled run arrives while the network is denied or degraded, skip
+  that interval and schedule the next one;
+- if Wi-Fi becomes denied or degraded while Kopia is running, stop Kopia with
+  TERM, then KILL if it does not exit.
+
+The app appends human-readable audit logs to:
 
 ```bash
-perl -pe 's/\r/\n/g' /Users/vera/Library/Logs/kopia-backup.log | rg 'kopia backup starting|network allowed|skip:|abort:|success:|failure:'
-perl -pe 's/\r/\n/g' /Users/vera/Library/Logs/kopia-backup.log | rg -c 'storage_cap_exceeded|Cannot upload files, storage cap exceeded'
-perl -pe 's/\r/\n/g' /Users/vera/Library/Logs/kopia-backup.log | rg -c 'resource deadlock avoided|operation not permitted'
+/Users/vera/Library/Logs/kopia-backup.log
 ```
-
-`storage_cap_exceeded` is a real B2-side cap/quota failure that must be fixed
-outside pyinfra. `resource deadlock avoided` and `operation not permitted` are
-local file-read failures; review recurring paths before adding broad Kopia
-ignore policies.
 
 ## Restore Test
 

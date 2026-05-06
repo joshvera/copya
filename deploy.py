@@ -19,53 +19,71 @@ user = data("user")
 home = data("home")
 backup_source = data("backup_source")
 deny_ssids = data("deny_ssids")
-launchd_label = data("launchd_label")
+legacy_backup_launchd_label = data("legacy_backup_launchd_label")
+monitor_launchd_label = data("monitor_launchd_label")
 run_interval_seconds = data("run_interval_seconds")
 network_check_interval_seconds = data("network_check_interval_seconds")
 runner_dir = data("runner_dir")
-env_file = data("env_file")
 log_file = data("log_file")
-ssid_helper_name = data("ssid_helper_name")
-ssid_helper_bundle_name = data("ssid_helper_bundle_name")
-ssid_helper_bundle_identifier = data("ssid_helper_bundle_identifier")
+status_file = data("status_file")
+app_name = data("app_name")
+app_executable_name = data("app_executable_name")
+app_bundle_identifier = data("app_bundle_identifier")
+legacy_monitor_app_names = data("legacy_monitor_app_names")
+app_signing_identity = data("app_signing_identity")
 onepassword_cli_package = data("onepassword_cli_package")
 kopia_password_ref = data("kopia_password_ref")
 use_sudo = bool_data("use_sudo")
 
-runner_path = f"{runner_dir}/kopia-safe-run.sh"
-plist_path = f"{home}/Library/LaunchAgents/{launchd_label}.plist"
 launch_agents_dir = f"{home}/Library/LaunchAgents"
-env_dir = env_file.rsplit("/", 1)[0]
 log_dir = log_file.rsplit("/", 1)[0]
-ssid_helper_bundle_dir = f"{runner_dir}/{ssid_helper_bundle_name}.app"
-ssid_helper_contents_dir = f"{ssid_helper_bundle_dir}/Contents"
-ssid_helper_macos_dir = f"{ssid_helper_contents_dir}/MacOS"
-ssid_helper_path = f"{ssid_helper_macos_dir}/{ssid_helper_name}"
-ssid_helper_source_path = f"{runner_dir}/{ssid_helper_name}.swift"
-ssid_helper_plist_path = f"{ssid_helper_contents_dir}/Info.plist"
-ssid_helper_entitlements_path = f"{ssid_helper_contents_dir}/entitlements.plist"
-ssid_helper_stamp_path = f"{runner_dir}/{ssid_helper_name}.sha256"
+status_dir = status_file.rsplit("/", 1)[0]
+
+app_bundle_dir = f"{runner_dir}/{app_name}.app"
+app_contents_dir = f"{app_bundle_dir}/Contents"
+app_macos_dir = f"{app_contents_dir}/MacOS"
+app_resources_dir = f"{app_contents_dir}/Resources"
+app_executable_path = f"{app_macos_dir}/{app_executable_name}"
+app_source_path = f"{runner_dir}/{app_executable_name}.swift"
+app_info_plist_path = f"{app_contents_dir}/Info.plist"
+app_entitlements_path = f"{app_contents_dir}/entitlements.plist"
+app_stamp_path = f"{runner_dir}/{app_executable_name}.sha256"
+
+monitor_plist_path = f"{launch_agents_dir}/{monitor_launchd_label}.plist"
+legacy_backup_plist_path = f"{launch_agents_dir}/{legacy_backup_launchd_label}.plist"
+legacy_runner_path = f"{runner_dir}/kopia-safe-run.sh"
+legacy_helper_bundle_dir = f"{runner_dir}/Kopia WiFi SSID Helper.app"
+legacy_helper_source_path = f"{runner_dir}/kopia-wifi-ssid.swift"
+legacy_helper_stamp_path = f"{runner_dir}/kopia-wifi-ssid.sha256"
+legacy_monitor_app_bundle_dirs = [
+    f"{runner_dir}/{legacy_app_name}.app"
+    for legacy_app_name in legacy_monitor_app_names
+]
 
 uid_command = f"id -u {user}"
 launchd_domain = f"gui/$({uid_command})"
-launchd_service = f"{launchd_domain}/{launchd_label}"
+monitor_launchd_service = f"{launchd_domain}/{monitor_launchd_label}"
 
 template_context = {
+    "app_bundle_identifier": app_bundle_identifier,
+    "app_executable_name": app_executable_name,
+    "app_executable_path": app_executable_path,
+    "app_name": app_name,
     "backup_source": backup_source,
     "deny_ssids": deny_ssids,
-    "env_file": env_file,
-    "launchd_label": launchd_label,
-    "log_file": log_file,
+    "home": home,
     "kopia_password_ref": kopia_password_ref,
+    "log_file": log_file,
+    "monitor_launchd_label": monitor_launchd_label,
     "network_check_interval_seconds": network_check_interval_seconds,
     "run_interval_seconds": run_interval_seconds,
-    "runner_path": runner_path,
-    "ssid_helper_path": ssid_helper_path,
+    "runner_dir": runner_dir,
+    "status_file": status_file,
 }
 
 
 server.shell(
-    name="Validate configured macOS user and home",
+    name="Validate configured macOS user, home, and signing identity",
     commands=[
         (
             f'id -u "{user}" >/dev/null 2>&1 || '
@@ -83,6 +101,11 @@ server.shell(
             f'(echo "Configured home {home} is not owned by {user}; refusing '
             'to manage files there." >&2; exit 1)'
         ),
+        (
+            f'security find-identity -v -p codesigning | grep -F "{app_signing_identity}" '
+            f'>/dev/null || (echo "Signing identity not found: {app_signing_identity}" '
+            '>&2; exit 1)'
+        ),
     ],
 )
 
@@ -92,16 +115,8 @@ brew.packages(
 )
 
 files.directory(
-    name="Create Kopia runner directory",
+    name="Create Kopia monitor state directory",
     path=runner_dir,
-    mode="700",
-    user=user,
-    _sudo=use_sudo,
-)
-
-files.directory(
-    name="Create Kopia env directory",
-    path=env_dir,
     mode="700",
     user=user,
     _sudo=use_sudo,
@@ -116,6 +131,14 @@ files.directory(
 )
 
 files.directory(
+    name="Create Kopia status directory",
+    path=status_dir,
+    mode="700",
+    user=user,
+    _sudo=use_sudo,
+)
+
+files.directory(
     name="Create LaunchAgents directory",
     path=launch_agents_dir,
     mode="755",
@@ -124,107 +147,104 @@ files.directory(
 )
 
 files.directory(
-    name="Create Kopia SSID helper bundle directory",
-    path=ssid_helper_bundle_dir,
-    mode="700",
+    name="Create Kopia monitor app bundle directory",
+    path=app_bundle_dir,
+    mode="755",
     user=user,
     _sudo=use_sudo,
 )
 
 files.directory(
-    name="Create Kopia SSID helper Contents directory",
-    path=ssid_helper_contents_dir,
-    mode="700",
+    name="Create Kopia monitor Contents directory",
+    path=app_contents_dir,
+    mode="755",
     user=user,
     _sudo=use_sudo,
 )
 
 files.directory(
-    name="Create Kopia SSID helper MacOS directory",
-    path=ssid_helper_macos_dir,
-    mode="700",
+    name="Create Kopia monitor MacOS directory",
+    path=app_macos_dir,
+    mode="755",
+    user=user,
+    _sudo=use_sudo,
+)
+
+files.directory(
+    name="Create Kopia monitor Resources directory",
+    path=app_resources_dir,
+    mode="755",
     user=user,
     _sudo=use_sudo,
 )
 
 files.template(
-    name="Install Kopia SSID helper source",
-    src="templates/kopia-wifi-ssid.swift.j2",
-    dest=ssid_helper_source_path,
+    name="Install Kopia monitor Swift source",
+    src="templates/kopia-backup-monitor.swift.j2",
+    dest=app_source_path,
     mode="600",
     user=user,
+    **template_context,
     _sudo=use_sudo,
 )
 
 files.template(
-    name="Install Kopia SSID helper Info.plist",
-    src="templates/kopia-wifi-ssid.Info.plist.j2",
-    dest=ssid_helper_plist_path,
-    mode="600",
+    name="Install Kopia monitor Info.plist",
+    src="templates/kopia-backup-monitor.Info.plist.j2",
+    dest=app_info_plist_path,
+    mode="644",
     user=user,
-    ssid_helper_bundle_identifier=ssid_helper_bundle_identifier,
-    ssid_helper_bundle_name=ssid_helper_bundle_name,
-    ssid_helper_name=ssid_helper_name,
+    **template_context,
     _sudo=use_sudo,
 )
 
 files.template(
-    name="Install Kopia SSID helper entitlements",
-    src="templates/kopia-wifi-ssid.entitlements.plist.j2",
-    dest=ssid_helper_entitlements_path,
+    name="Install Kopia monitor entitlements",
+    src="templates/kopia-backup-monitor.entitlements.plist.j2",
+    dest=app_entitlements_path,
     mode="600",
     user=user,
+    **template_context,
     _sudo=use_sudo,
 )
 
 server.shell(
-    name="Build Kopia SSID helper",
+    name="Build and sign Kopia monitor app",
     commands=[
         "command -v swiftc >/dev/null 2>&1 || "
-        '(echo "swiftc is required to build the Kopia SSID helper." >&2; exit 1)',
+        '(echo "swiftc is required to build the Kopia monitor app." >&2; exit 1)',
         (
-            f'helper_hash="$(shasum -a 256 "{ssid_helper_source_path}" '
-            f'"{ssid_helper_plist_path}" "{ssid_helper_entitlements_path}" '
+            f'app_hash="$(shasum -a 256 "{app_source_path}" '
+            f'"{app_info_plist_path}" "{app_entitlements_path}" '
             f'| shasum -a 256 | awk \'{{print $1}}\')"; '
-            f'current_hash="$(cat "{ssid_helper_stamp_path}" 2>/dev/null || true)"; '
-            f'if test -x "{ssid_helper_path}" && '
-            f'test "$current_hash" = "$helper_hash"; then '
-            f'echo "Kopia SSID helper already current"; exit 0; fi; '
-            f'swiftc -O -framework AppKit -framework CoreWLAN -framework CoreLocation '
-            f'"{ssid_helper_source_path}" -o "{ssid_helper_path}"; '
-            f'chmod 700 "{ssid_helper_path}"; '
-            f'codesign --force --deep --sign - '
-            f'--entitlements "{ssid_helper_entitlements_path}" '
-            f'"{ssid_helper_bundle_dir}" >/dev/null; '
-            f'printf "%s\\n" "$helper_hash" > "{ssid_helper_stamp_path}"; '
-            f'chmod 600 "{ssid_helper_stamp_path}"; '
+            f'app_hash="$(printf "%s\\n%s\\n" "$app_hash" "{app_signing_identity}" '
+            f'| shasum -a 256 | awk \'{{print $1}}\')"; '
+            f'current_hash="$(cat "{app_stamp_path}" 2>/dev/null || true)"; '
+            f'if test -x "{app_executable_path}" && '
+            f'test "$current_hash" = "$app_hash" && '
+            f'codesign --verify --deep --strict "{app_bundle_dir}" >/dev/null 2>&1; then '
+            f'echo "Kopia monitor app already current"; exit 0; fi; '
+            f'swiftc -parse-as-library -O '
+            f'-framework SwiftUI -framework AppKit -framework CoreLocation '
+            f'-framework CoreWLAN -framework Network '
+            f'"{app_source_path}" -o "{app_executable_path}"; '
+            f'chmod 755 "{app_executable_path}"; '
+            f'codesign --force --deep --options runtime --sign "{app_signing_identity}" '
+            f'--entitlements "{app_entitlements_path}" '
+            f'"{app_bundle_dir}" >/dev/null; '
+            f'printf "%s\\n" "$app_hash" > "{app_stamp_path}"; '
+            f'chmod 600 "{app_stamp_path}"; '
             f'if test "$(id -un)" != "{user}"; then '
-            f'chown "{user}" "{ssid_helper_path}" "{ssid_helper_stamp_path}"; fi'
+            f'chown -R "{user}" "{app_bundle_dir}" "{app_stamp_path}"; fi'
         ),
     ],
     _sudo=use_sudo,
 )
 
 files.template(
-    name="Install Kopia network-gated runner",
-    src="templates/kopia-safe-run.sh.j2",
-    dest=runner_path,
-    mode="700",
-    user=user,
-    backup_source=backup_source,
-    deny_ssids=deny_ssids,
-    env_file=env_file,
-    kopia_password_ref=kopia_password_ref,
-    log_file=log_file,
-    network_check_interval_seconds=network_check_interval_seconds,
-    ssid_helper_path=ssid_helper_path,
-    _sudo=use_sudo,
-)
-
-files.template(
-    name="Install Kopia LaunchAgent plist",
-    src="templates/kopia-backup.plist.j2",
-    dest=plist_path,
+    name="Install Kopia monitor LaunchAgent plist",
+    src="templates/kopia-monitor.plist.j2",
+    dest=monitor_plist_path,
     mode="644",
     user=user,
     **template_context,
@@ -232,33 +252,59 @@ files.template(
 )
 
 server.shell(
-    name="Bootout existing Kopia LaunchAgent",
+    name="Remove legacy Kopia runner LaunchAgent",
     commands=[
-        f'launchctl bootout "{launchd_domain}" "{plist_path}" || true',
+        f'launchctl bootout "{launchd_domain}" "{legacy_backup_plist_path}" || true',
+        f'pkill -TERM -f "^{legacy_runner_path}$" || true',
+        f'pkill -TERM -f "^kopia snapshot create --no-progress {backup_source}$" || true',
+        f'rm -f "{legacy_backup_plist_path}" "{legacy_runner_path}" '
+        f'"{legacy_helper_source_path}" "{legacy_helper_stamp_path}"',
+        f'rm -rf "{legacy_helper_bundle_dir}"',
     ],
     _sudo=use_sudo,
 )
 
 server.shell(
-    name="Bootstrap Kopia LaunchAgent",
+    name="Bootout existing Kopia monitor LaunchAgent",
     commands=[
-        f'launchctl bootstrap "{launchd_domain}" "{plist_path}"',
+        f'launchctl bootout "{launchd_domain}" "{monitor_plist_path}" || true',
     ],
     _sudo=use_sudo,
 )
 
 server.shell(
-    name="Enable Kopia LaunchAgent",
+    name="Remove renamed Kopia monitor app bundles",
     commands=[
-        f'launchctl enable "{launchd_service}"',
+        " ".join(
+            [
+                "rm -rf",
+                *[f'"{path}"' for path in legacy_monitor_app_bundle_dirs],
+            ]
+        ),
     ],
     _sudo=use_sudo,
 )
 
 server.shell(
-    name="Kickstart Kopia LaunchAgent",
+    name="Bootstrap Kopia monitor LaunchAgent",
     commands=[
-        f'launchctl kickstart -k "{launchd_service}"',
+        f'launchctl bootstrap "{launchd_domain}" "{monitor_plist_path}"',
+    ],
+    _sudo=use_sudo,
+)
+
+server.shell(
+    name="Enable Kopia monitor LaunchAgent",
+    commands=[
+        f'launchctl enable "{monitor_launchd_service}"',
+    ],
+    _sudo=use_sudo,
+)
+
+server.shell(
+    name="Kickstart Kopia monitor LaunchAgent",
+    commands=[
+        f'launchctl kickstart -k "{monitor_launchd_service}"',
     ],
     _sudo=use_sudo,
 )

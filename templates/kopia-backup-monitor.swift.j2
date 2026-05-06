@@ -1,0 +1,1228 @@
+import AppKit
+import CoreLocation
+import CoreWLAN
+import Darwin
+import Foundation
+import Network
+import SwiftUI
+
+enum Config {
+    static let appVersion = "1.0"
+    static let appName = "{{ app_name }}"
+    static let bundleIdentifier = "{{ app_bundle_identifier }}"
+    static let monitorLaunchdLabel = "{{ monitor_launchd_label }}"
+    static let backupSource = "{{ backup_source }}"
+    static let logFile = "{{ log_file }}"
+    static let statusFile = "{{ status_file }}"
+    static let kopiaPasswordRef = "{{ kopia_password_ref }}"
+    static let runIntervalSeconds = {{ run_interval_seconds }}
+    static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
+    static let denySSIDs = Set<String>([
+{% for ssid in deny_ssids %}
+        "{{ ssid }}",
+{% endfor %}
+    ])
+    static let executableSearchPath = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+}
+
+enum DateFormatters {
+    static let iso = ISO8601DateFormatter()
+
+    static let log: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        return formatter
+    }()
+
+    static let menu: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+}
+
+struct ConfigSummary: Codable {
+    var app_name: String
+    var backup_source: String
+    var run_interval_seconds: Int
+    var network_check_interval_seconds: Int
+    var deny_ssids: [String]
+    var password_ref_configured: Bool
+    var app_bundle_identifier: String
+    var monitor_launchd_label: String
+    var log_file: String
+    var status_file: String
+}
+
+struct NetworkSnapshot: Codable {
+    var state: String
+    var allowed: Bool
+    var device: String?
+    var ssid: String?
+    var reason: String
+    var location_authorization: String
+    var is_expensive: Bool
+    var is_constrained: Bool
+    var deny_ssids: [String]
+}
+
+struct StatusSnapshot: Codable {
+    var app_version: String
+    var updated_at: String
+    var state: String
+    var network_state: String
+    var network_ssid: String?
+    var network_reason: String
+    var network_is_expensive: Bool
+    var network_is_constrained: Bool
+    var next_run_at: String?
+    var active_pid: Int32?
+    var last_start_at: String?
+    var last_success_at: String?
+    var last_failure_at: String?
+    var last_failure: String?
+    var last_abort_reason: String?
+    var config_summary: ConfigSummary
+
+    enum CodingKeys: String, CodingKey {
+        case app_version
+        case updated_at
+        case state
+        case network_state
+        case network_ssid
+        case network_reason
+        case network_is_expensive
+        case network_is_constrained
+        case next_run_at
+        case active_pid
+        case last_start_at
+        case last_success_at
+        case last_failure_at
+        case last_failure
+        case last_abort_reason
+        case config_summary
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(app_version, forKey: .app_version)
+        try container.encode(updated_at, forKey: .updated_at)
+        try container.encode(state, forKey: .state)
+        try container.encode(network_state, forKey: .network_state)
+        try container.encode(network_reason, forKey: .network_reason)
+        try container.encode(network_is_expensive, forKey: .network_is_expensive)
+        try container.encode(network_is_constrained, forKey: .network_is_constrained)
+        try container.encode(config_summary, forKey: .config_summary)
+        try encodeOptional(network_ssid, into: &container, forKey: .network_ssid)
+        try encodeOptional(next_run_at, into: &container, forKey: .next_run_at)
+        try encodeOptional(active_pid, into: &container, forKey: .active_pid)
+        try encodeOptional(last_start_at, into: &container, forKey: .last_start_at)
+        try encodeOptional(last_success_at, into: &container, forKey: .last_success_at)
+        try encodeOptional(last_failure_at, into: &container, forKey: .last_failure_at)
+        try encodeOptional(last_failure, into: &container, forKey: .last_failure)
+        try encodeOptional(last_abort_reason, into: &container, forKey: .last_abort_reason)
+    }
+
+    private func encodeOptional<T: Encodable>(
+        _ value: T?,
+        into container: inout KeyedEncodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws {
+        if let value {
+            try container.encode(value, forKey: key)
+        } else {
+            try container.encodeNil(forKey: key)
+        }
+    }
+}
+
+enum BackupState: String {
+    case ready
+    case syncing
+    case paused
+    case needsPermission = "needs_permission"
+    case failed
+    case disabled
+}
+
+enum LocationStatus {
+    static func name(_ status: CLAuthorizationStatus) -> String {
+        switch status {
+        case .notDetermined:
+            return "notDetermined"
+        case .restricted:
+            return "restricted"
+        case .denied:
+            return "denied"
+        case .authorizedAlways:
+            return "authorizedAlways"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    static func isAuthorized(_ status: CLAuthorizationStatus) -> Bool {
+        status == .authorizedAlways
+    }
+}
+
+enum NetworkPolicy {
+    static func current(isExpensive: Bool, isConstrained: Bool) -> NetworkSnapshot {
+        let authorization = CLLocationManager().authorizationStatus
+        let authorizationName = LocationStatus.name(authorization)
+
+        guard CLLocationManager.locationServicesEnabled() else {
+            return snapshot(
+                state: "permission",
+                allowed: false,
+                device: nil,
+                ssid: nil,
+                reason: "Location Services are disabled",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        guard LocationStatus.isAuthorized(authorization) else {
+            return snapshot(
+                state: "permission",
+                allowed: false,
+                device: nil,
+                ssid: nil,
+                reason: "Location permission is \(authorizationName)",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        let client = CWWiFiClient.shared()
+        guard let wifiInterface = client.interface() else {
+            return snapshot(
+                state: "missing",
+                allowed: false,
+                device: nil,
+                ssid: nil,
+                reason: "No Wi-Fi interface found",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        let device = wifiInterface.interfaceName
+        let ssid = readSSID(from: wifiInterface)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let ssid, !ssid.isEmpty else {
+            return snapshot(
+                state: "missing",
+                allowed: false,
+                device: device,
+                ssid: nil,
+                reason: "No SSID detected",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        if isRedacted(ssid) {
+            return snapshot(
+                state: "redacted",
+                allowed: false,
+                device: device,
+                ssid: ssid,
+                reason: "SSID redacted by macOS privacy controls",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        if Config.denySSIDs.contains(ssid) {
+            return snapshot(
+                state: "denied",
+                allowed: false,
+                device: device,
+                ssid: ssid,
+                reason: "SSID is denied",
+                authorization: authorizationName,
+                isExpensive: isExpensive,
+                isConstrained: isConstrained
+            )
+        }
+
+        var reason = "SSID is allowed"
+        if isConstrained {
+            reason += "; Low Data Mode is on"
+        } else if isExpensive {
+            reason += "; network is marked expensive"
+        }
+
+        return snapshot(
+            state: "allowed",
+            allowed: true,
+            device: device,
+            ssid: ssid,
+            reason: reason,
+            authorization: authorizationName,
+            isExpensive: isExpensive,
+            isConstrained: isConstrained
+        )
+    }
+
+    private static func readSSID(from wifiInterface: CWInterface) -> String? {
+        if let ssid = wifiInterface.ssid(), !ssid.isEmpty {
+            return ssid
+        }
+
+        if let ssidData = wifiInterface.ssidData(),
+           let ssid = String(data: ssidData, encoding: .utf8),
+           !ssid.isEmpty {
+            return ssid
+        }
+
+        return nil
+    }
+
+    private static func isRedacted(_ ssid: String) -> Bool {
+        ssid == "<redacted>" || ssid == "redacted" || ssid == "Wi-Fi" || ssid == "WLAN"
+    }
+
+    private static func snapshot(
+        state: String,
+        allowed: Bool,
+        device: String?,
+        ssid: String?,
+        reason: String,
+        authorization: String,
+        isExpensive: Bool,
+        isConstrained: Bool
+    ) -> NetworkSnapshot {
+        NetworkSnapshot(
+            state: state,
+            allowed: allowed,
+            device: device,
+            ssid: ssid,
+            reason: reason,
+            location_authorization: authorization,
+            is_expensive: isExpensive,
+            is_constrained: isConstrained,
+            deny_ssids: Array(Config.denySSIDs).sorted()
+        )
+    }
+}
+
+struct CommandResult {
+    var status: Int32
+    var stdout: String
+    var stderr: String
+}
+
+enum CommandRunner {
+    static func findExecutable(_ name: String) -> String? {
+        for directory in Config.executableSearchPath {
+            let candidate = "\(directory)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    static func run(_ executable: String, arguments: [String]) throws -> CommandResult {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+
+        return CommandResult(
+            status: process.terminationStatus,
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+}
+
+final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate {
+    static let shared = BackupMonitor()
+
+    @Published var state: BackupState = .disabled
+    @Published var network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+    @Published var nextRunAt: Date?
+    @Published var lastStartAt: Date?
+    @Published var lastSuccessAt: Date?
+    @Published var lastFailureAt: Date?
+    @Published var lastFailure: String?
+    @Published var lastAbortReason: String?
+    @Published var activePID: Int32?
+
+    private let locationManager = CLLocationManager()
+    private let pathMonitor = NWPathMonitor()
+    private let pathQueue = DispatchQueue(label: "kopia.monitor.network-path")
+    private var timer: Timer?
+    private var started = false
+    private var activeProcess: Process?
+    private var activePipe: Pipe?
+    private var stopReason: String?
+    private var lastNetworkCheckAt = Date.distantPast
+    private var pathIsExpensive = false
+    private var pathIsConstrained = false
+
+    private override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        loadPersistedStatus()
+    }
+
+    func start() {
+        guard !started else {
+            return
+        }
+        started = true
+
+        appendLog("monitor starting")
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.pathIsExpensive = path.isExpensive
+                self?.pathIsConstrained = path.isConstrained
+                self?.refreshNetwork(reason: "path-update", shouldEvaluateSchedule: true)
+            }
+        }
+        pathMonitor.start(queue: pathQueue)
+
+        refreshNetwork(reason: "startup", shouldEvaluateSchedule: true)
+        timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    func requestLocationPermission() {
+        appendLog("requesting Location Services permission")
+        if let executableURL = Bundle.main.executableURL {
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = ["--request-location"]
+            try? process.run()
+        } else {
+            locationManager.requestAlwaysAuthorization()
+            locationManager.startUpdatingLocation()
+        }
+    }
+
+    func checkNetworkNow() {
+        refreshNetwork(reason: "manual-check", shouldEvaluateSchedule: true)
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        refreshNetwork(reason: "location-authorization", shouldEvaluateSchedule: true)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        refreshNetwork(reason: "location-update", shouldEvaluateSchedule: true)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        refreshNetwork(reason: "location-error", shouldEvaluateSchedule: true)
+    }
+
+    func startBackup(trigger: String) {
+        guard activeProcess == nil else {
+            appendLog("start ignored: backup already running pid=\(activePID ?? 0)")
+            return
+        }
+
+        refreshNetwork(reason: "start-\(trigger)", shouldEvaluateSchedule: false)
+        guard network.allowed else {
+            appendLog("start blocked: network_state=\(network.state) reason='\(network.reason)'")
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
+        guard let opPath = CommandRunner.findExecutable("op") else {
+            recordFailure("1Password CLI 'op' is not installed or not on PATH")
+            return
+        }
+
+        guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
+            recordFailure("Kopia is not installed or not on PATH")
+            return
+        }
+
+        let password: String
+        do {
+            let result = try CommandRunner.run(opPath, arguments: ["read", Config.kopiaPasswordRef])
+            guard result.status == 0 else {
+                recordFailure("Unable to read Kopia password from 1Password reference")
+                if !result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    appendLog("op read failed: \(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+                }
+                return
+            }
+            password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            recordFailure("Unable to run 1Password CLI: \(error.localizedDescription)")
+            return
+        }
+
+        guard !password.isEmpty else {
+            recordFailure("1Password returned an empty Kopia password")
+            return
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+        var environment = ProcessInfo.processInfo.environment
+        environment["KOPIA_PASSWORD"] = password
+        environment["PATH"] = Config.executableSearchPath.joined(separator: ":")
+
+        process.executableURL = URL(fileURLWithPath: kopiaPath)
+        process.arguments = ["snapshot", "create", "--no-progress", Config.backupSource]
+        process.environment = environment
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                return
+            }
+            self?.appendDataToLog(data)
+        }
+
+        process.terminationHandler = { [weak self] finished in
+            DispatchQueue.main.async {
+                self?.handleBackupExit(status: finished.terminationStatus)
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            recordFailure("Unable to start Kopia: \(error.localizedDescription)")
+            return
+        }
+
+        activeProcess = process
+        activePipe = pipe
+        activePID = process.processIdentifier
+        stopReason = nil
+        lastStartAt = Date()
+        lastFailure = nil
+        lastFailureAt = nil
+        lastAbortReason = nil
+        lastNetworkCheckAt = Date()
+        state = .syncing
+
+        appendLog("kopia backup starting trigger=\(trigger) pid=\(process.processIdentifier)")
+        appendLog("running: kopia snapshot create --no-progress \(Config.backupSource)")
+        writeStatus()
+    }
+
+    func stopBackup(reason: String = "manual stop") {
+        guard let process = activeProcess else {
+            return
+        }
+
+        stopReason = reason
+        lastAbortReason = reason
+        appendLog("abort: \(reason); stopping kopia pid \(process.processIdentifier)")
+        process.terminate()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self, weak process] in
+            guard let process, process.isRunning else {
+                return
+            }
+            self?.appendLog("abort: kopia pid \(process.processIdentifier) did not stop after TERM; sending KILL")
+            kill(process.processIdentifier, SIGKILL)
+        }
+    }
+
+    func openLog() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: Config.logFile))
+    }
+
+    func copyDebugStatus() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(currentStatus()),
+              let string = String(data: data, encoding: .utf8) else {
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    func quit() {
+        if activeProcess != nil {
+            stopBackup(reason: "monitor quitting")
+        }
+        appendLog("monitor quitting")
+        NSApp.terminate(nil)
+    }
+
+    var menuTitle: String {
+        switch state {
+        case .ready:
+            return "Ready"
+        case .syncing:
+            return "Syncing"
+        case .paused:
+            return "Paused"
+        case .needsPermission:
+            return "Needs Permission"
+        case .failed:
+            return "Failed"
+        case .disabled:
+            return "Disabled"
+        }
+    }
+
+    var menuSystemImage: String {
+        switch state {
+        case .ready:
+            return "checkmark.circle"
+        case .syncing:
+            return "arrow.triangle.2.circlepath.circle"
+        case .paused:
+            return "pause.circle"
+        case .needsPermission, .failed:
+            return "exclamationmark.triangle"
+        case .disabled:
+            return "wifi.slash"
+        }
+    }
+
+    var canStartManual: Bool {
+        activeProcess == nil && network.allowed
+    }
+
+    var canStopManual: Bool {
+        activeProcess != nil
+    }
+
+    var ssidText: String {
+        network.ssid ?? "unknown"
+    }
+
+    var nextRunText: String {
+        guard let nextRunAt else {
+            return "not scheduled"
+        }
+        return DateFormatters.menu.string(from: nextRunAt)
+    }
+
+    var lastSuccessText: String {
+        guard let lastSuccessAt else {
+            return "never"
+        }
+        return DateFormatters.menu.string(from: lastSuccessAt)
+    }
+
+    var activePIDText: String {
+        guard let activePID else {
+            return "none"
+        }
+        return String(activePID)
+    }
+
+    private func tick() {
+        refreshNetwork(reason: "timer", shouldEvaluateSchedule: true)
+
+        if activeProcess != nil {
+            let elapsed = Date().timeIntervalSince(lastNetworkCheckAt)
+            if elapsed >= TimeInterval(Config.networkCheckIntervalSeconds) {
+                lastNetworkCheckAt = Date()
+                if !network.allowed {
+                    stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
+                }
+            }
+        }
+    }
+
+    private func refreshNetwork(reason: String, shouldEvaluateSchedule: Bool) {
+        let wasAllowed = network.allowed
+        network = NetworkPolicy.current(isExpensive: pathIsExpensive, isConstrained: pathIsConstrained)
+        let becameAllowed = !wasAllowed && network.allowed
+
+        if shouldEvaluateSchedule {
+            evaluateSchedule(becameAllowed: becameAllowed, reason: reason)
+        }
+
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func evaluateSchedule(becameAllowed: Bool, reason: String) {
+        guard activeProcess == nil else {
+            return
+        }
+
+        let now = Date()
+
+        if network.allowed {
+            if lastSuccessAt == nil && (becameAllowed || reason == "startup") {
+                startBackup(trigger: "first-allowed-network")
+                return
+            }
+
+            if let nextRunAt, now >= nextRunAt {
+                startBackup(trigger: "scheduled")
+                return
+            }
+
+            return
+        }
+
+        if let nextRunAt, now >= nextRunAt {
+            let skipReason = "scheduled backup skipped: network_state=\(network.state) reason='\(network.reason)'"
+            lastAbortReason = skipReason
+            self.nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            appendLog("skip: \(skipReason); next_run_at=\(DateFormatters.iso.string(from: self.nextRunAt!))")
+        }
+    }
+
+    private func handleBackupExit(status: Int32) {
+        activePipe?.fileHandleForReading.readabilityHandler = nil
+        activePipe = nil
+        activeProcess = nil
+        activePID = nil
+
+        let now = Date()
+        if let reason = stopReason {
+            lastAbortReason = reason
+            nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            appendLog("kopia backup aborted intentionally: \(reason)")
+            stopReason = nil
+        } else if status == 0 {
+            lastSuccessAt = now
+            lastFailureAt = nil
+            lastFailure = nil
+            lastAbortReason = nil
+            nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            appendLog("success: kopia snapshot complete")
+        } else {
+            recordFailure("Kopia exited with status \(status)")
+            return
+        }
+
+        appendLog("kopia backup finished")
+        refreshNetwork(reason: "backup-exit", shouldEvaluateSchedule: false)
+    }
+
+    private func recordFailure(_ message: String) {
+        lastFailureAt = Date()
+        lastFailure = message
+        nextRunAt = Date().addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+        appendLog("failure: \(message)")
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func updateDerivedState() {
+        if activeProcess != nil {
+            state = .syncing
+            return
+        }
+
+        switch network.state {
+        case "allowed":
+            state = lastFailureAt == nil ? .ready : .failed
+        case "denied":
+            state = .paused
+        case "missing":
+            state = .disabled
+        default:
+            state = .needsPermission
+        }
+    }
+
+    private func loadPersistedStatus() {
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)),
+           let status = try? JSONDecoder().decode(StatusSnapshot.self, from: data) {
+            lastStartAt = parseDate(status.last_start_at)
+            lastSuccessAt = parseDate(status.last_success_at)
+            lastFailureAt = parseDate(status.last_failure_at)
+            lastFailure = status.last_failure
+            lastAbortReason = status.last_abort_reason
+            nextRunAt = parseDate(status.next_run_at)
+        }
+
+        if lastSuccessAt == nil, let seeded = seedLastSuccessFromLog() {
+            lastSuccessAt = seeded
+            nextRunAt = seeded.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+        }
+    }
+
+    private func seedLastSuccessFromLog() -> Date? {
+        guard let text = try? String(contentsOfFile: Config.logFile, encoding: .utf8) else {
+            return nil
+        }
+
+        var seeded: Date?
+        for line in text.split(separator: "\n") {
+            guard line.contains("success: kopia snapshot complete") else {
+                continue
+            }
+            let prefix = String(line.prefix(24))
+            if let date = DateFormatters.log.date(from: prefix) {
+                seeded = date
+            }
+        }
+        return seeded
+    }
+
+    private func parseDate(_ value: String?) -> Date? {
+        guard let value else {
+            return nil
+        }
+        return DateFormatters.iso.date(from: value)
+    }
+
+    private func dateString(_ date: Date?) -> String? {
+        guard let date else {
+            return nil
+        }
+        return DateFormatters.iso.string(from: date)
+    }
+
+    private func configSummary() -> ConfigSummary {
+        ConfigSummary(
+            app_name: Config.appName,
+            backup_source: Config.backupSource,
+            run_interval_seconds: Config.runIntervalSeconds,
+            network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+            deny_ssids: Array(Config.denySSIDs).sorted(),
+            password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+            app_bundle_identifier: Config.bundleIdentifier,
+            monitor_launchd_label: Config.monitorLaunchdLabel,
+            log_file: Config.logFile,
+            status_file: Config.statusFile
+        )
+    }
+
+    private func currentStatus() -> StatusSnapshot {
+        StatusSnapshot(
+            app_version: Config.appVersion,
+            updated_at: DateFormatters.iso.string(from: Date()),
+            state: state.rawValue,
+            network_state: network.state,
+            network_ssid: network.ssid,
+            network_reason: network.reason,
+            network_is_expensive: network.is_expensive,
+            network_is_constrained: network.is_constrained,
+            next_run_at: dateString(nextRunAt),
+            active_pid: activePID,
+            last_start_at: dateString(lastStartAt),
+            last_success_at: dateString(lastSuccessAt),
+            last_failure_at: dateString(lastFailureAt),
+            last_failure: lastFailure,
+            last_abort_reason: lastAbortReason,
+            config_summary: configSummary()
+        )
+    }
+
+    private func writeStatus() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        guard let data = try? encoder.encode(currentStatus()) else {
+            return
+        }
+
+        let url = URL(fileURLWithPath: Config.statusFile)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private func appendLog(_ message: String) {
+        let line = "\(DateFormatters.log.string(from: Date())) \(message)\n"
+        guard let data = line.data(using: .utf8) else {
+            return
+        }
+        appendDataToLog(data)
+    }
+
+    private func appendDataToLog(_ data: Data) {
+        let url = URL(fileURLWithPath: Config.logFile)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: Config.logFile) {
+            FileManager.default.createFile(atPath: Config.logFile, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer {
+            try? handle.close()
+        }
+        _ = try? handle.seekToEnd()
+        _ = try? handle.write(contentsOf: data)
+    }
+}
+
+final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDelegate {
+    private let requestPermission: Bool
+    private let printStatusJSON: Bool
+    private let manager = CLLocationManager()
+    private var window: NSWindow?
+    private var statusLabel: NSTextField?
+    private var finished = false
+
+    init(requestPermission: Bool, printStatusJSON: Bool) {
+        self.requestPermission = requestPermission
+        self.printStatusJSON = printStatusJSON
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        showWindow(visible: requestPermission)
+        NSApp.activate(ignoringOtherApps: requestPermission)
+
+        if printStatusJSON {
+            printStatus()
+            exit(0)
+        }
+
+        if requestPermission {
+            guard CLLocationManager.locationServicesEnabled() else {
+                printNetworkJSON()
+                exit(3)
+            }
+            manager.requestAlwaysAuthorization()
+            manager.startUpdatingLocation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                self?.finish()
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.printNetworkJSON()
+                exit(0)
+            }
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        updateStatusLabel()
+        if manager.authorizationStatus != .notDetermined {
+            finish()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        finish()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        if manager.authorizationStatus != .notDetermined {
+            finish()
+        }
+    }
+
+    private func showWindow(visible: Bool) {
+        let contentRect = visible
+            ? NSRect(x: 0, y: 0, width: 480, height: 136)
+            : NSRect(x: 0, y: 0, width: 1, height: 1)
+        let window = NSWindow(
+            contentRect: contentRect,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = Config.appName
+        window.center()
+        window.alphaValue = visible ? 1.0 : 0.01
+
+        if visible {
+            let label = NSTextField(labelWithString: "Allow Location access so Kopia can read the current Wi-Fi network name and skip denied networks.")
+            label.frame = NSRect(x: 24, y: 58, width: 432, height: 48)
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 2
+            label.alignment = .center
+            window.contentView?.addSubview(label)
+
+            let statusLabel = NSTextField(labelWithString: "Permission status: \(LocationStatus.name(manager.authorizationStatus))")
+            statusLabel.frame = NSRect(x: 24, y: 28, width: 432, height: 20)
+            statusLabel.alignment = .center
+            window.contentView?.addSubview(statusLabel)
+            self.statusLabel = statusLabel
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
+    }
+
+    private func updateStatusLabel() {
+        statusLabel?.stringValue = "Permission status: \(LocationStatus.name(manager.authorizationStatus))"
+    }
+
+    private func finish() {
+        guard !finished else {
+            return
+        }
+        finished = true
+        manager.stopUpdatingLocation()
+        printNetworkJSON()
+        exit(LocationStatus.isAuthorized(manager.authorizationStatus) ? 0 : 3)
+    }
+
+    private func printNetworkJSON() {
+        let network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+        printEncoded(network)
+    }
+
+    private func printStatus() {
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)),
+           let string = String(data: data, encoding: .utf8) {
+            print(string)
+            return
+        }
+
+        let network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+        let state: BackupState
+        switch network.state {
+        case "allowed":
+            state = .ready
+        case "denied":
+            state = .paused
+        case "missing":
+            state = .disabled
+        default:
+            state = .needsPermission
+        }
+        let status = StatusSnapshot(
+            app_version: Config.appVersion,
+            updated_at: DateFormatters.iso.string(from: Date()),
+            state: state.rawValue,
+            network_state: network.state,
+            network_ssid: network.ssid,
+            network_reason: network.reason,
+            network_is_expensive: network.is_expensive,
+            network_is_constrained: network.is_constrained,
+            next_run_at: nil,
+            active_pid: nil,
+            last_start_at: nil,
+            last_success_at: nil,
+            last_failure_at: nil,
+            last_failure: nil,
+            last_abort_reason: nil,
+            config_summary: ConfigSummary(
+                app_name: Config.appName,
+                backup_source: Config.backupSource,
+                run_interval_seconds: Config.runIntervalSeconds,
+                network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+                deny_ssids: Array(Config.denySSIDs).sorted(),
+                password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+                app_bundle_identifier: Config.bundleIdentifier,
+                monitor_launchd_label: Config.monitorLaunchdLabel,
+                log_file: Config.logFile,
+                status_file: Config.statusFile
+            )
+        )
+        printEncoded(status)
+    }
+
+    private func printEncoded<T: Encodable>(_ value: T) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(value),
+              let string = String(data: data, encoding: .utf8) else {
+            fputs("unable to encode JSON\n", stderr)
+            exit(1)
+        }
+        print(string)
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        BackupMonitor.shared.stopBackup(reason: "monitor terminating")
+    }
+}
+
+func printEncodedJSON<T: Encodable>(_ value: T) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(value),
+          let string = String(data: data, encoding: .utf8) else {
+        fputs("unable to encode JSON\n", stderr)
+        exit(1)
+    }
+    print(string)
+}
+
+func printStatusJSONAndExit() -> Never {
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)),
+       let string = String(data: data, encoding: .utf8) {
+        print(string)
+        exit(0)
+    }
+
+    let network = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+    let state: BackupState
+    switch network.state {
+    case "allowed":
+        state = .ready
+    case "denied":
+        state = .paused
+    case "missing":
+        state = .disabled
+    default:
+        state = .needsPermission
+    }
+    let status = StatusSnapshot(
+        app_version: Config.appVersion,
+        updated_at: DateFormatters.iso.string(from: Date()),
+        state: state.rawValue,
+        network_state: network.state,
+        network_ssid: network.ssid,
+        network_reason: network.reason,
+        network_is_expensive: network.is_expensive,
+        network_is_constrained: network.is_constrained,
+        next_run_at: nil,
+        active_pid: nil,
+        last_start_at: nil,
+        last_success_at: nil,
+        last_failure_at: nil,
+        last_failure: nil,
+        last_abort_reason: nil,
+        config_summary: ConfigSummary(
+            app_name: Config.appName,
+            backup_source: Config.backupSource,
+            run_interval_seconds: Config.runIntervalSeconds,
+            network_check_interval_seconds: Config.networkCheckIntervalSeconds,
+            deny_ssids: Array(Config.denySSIDs).sorted(),
+            password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+            app_bundle_identifier: Config.bundleIdentifier,
+            monitor_launchd_label: Config.monitorLaunchdLabel,
+            log_file: Config.logFile,
+            status_file: Config.statusFile
+        )
+    )
+    printEncodedJSON(status)
+    exit(0)
+}
+
+func runCLI(requestPermission: Bool = false, printStatusJSON: Bool = false) -> Never {
+    let app = NSApplication.shared
+    let delegate = CLIAppDelegate(requestPermission: requestPermission, printStatusJSON: printStatusJSON)
+    app.delegate = delegate
+    app.run()
+    exit(1)
+}
+
+func runCLIIfNeeded() {
+    let arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
+    guard let command = arguments.first else {
+        return
+    }
+
+    switch command {
+    case "--network-json":
+        runCLI()
+    case "--status-json":
+        printStatusJSONAndExit()
+    case "--request-location":
+        runCLI(requestPermission: true)
+    default:
+        fputs("usage: \(Config.appName) [--network-json] [--status-json] [--request-location]\n", stderr)
+        exit(64)
+    }
+}
+
+@main
+struct KopiaBackupMonitorApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @ObservedObject private var monitor = BackupMonitor.shared
+
+    init() {
+        runCLIIfNeeded()
+        BackupMonitor.shared.start()
+    }
+
+    var body: some Scene {
+        MenuBarExtra(Config.appName, systemImage: monitor.menuSystemImage) {
+            Text(Config.appName)
+                .font(.headline)
+            Text(monitor.menuTitle)
+            Divider()
+            Text("SSID: \(monitor.ssidText)")
+            Text("Network: \(monitor.network.reason)")
+            if monitor.network.is_expensive || monitor.network.is_constrained {
+                Text("macOS marks this network as \(monitor.network.is_constrained ? "constrained" : "expensive")")
+            }
+            Divider()
+            Text("Last success: \(monitor.lastSuccessText)")
+            Text("Next run: \(monitor.nextRunText)")
+            Text("Active PID: \(monitor.activePIDText)")
+            if let failure = monitor.lastFailure {
+                Divider()
+                Text("Last failure: \(failure)")
+            }
+            if let abort = monitor.lastAbortReason {
+                Text("Last abort: \(abort)")
+            }
+            Divider()
+            Button("Start Backup Now") {
+                monitor.startBackup(trigger: "manual")
+            }
+            .disabled(!monitor.canStartManual)
+            Button("Stop Backup") {
+                monitor.stopBackup(reason: "manual stop")
+            }
+            .disabled(!monitor.canStopManual)
+            Button("Check Network") {
+                monitor.checkNetworkNow()
+            }
+            Button("Grant Wi-Fi Permission") {
+                monitor.requestLocationPermission()
+            }
+            Divider()
+            Button("Open Log") {
+                monitor.openLog()
+            }
+            Button("Copy Debug Status") {
+                monitor.copyDebugStatus()
+            }
+            Divider()
+            Button("Quit Monitor") {
+                monitor.quit()
+            }
+        }
+    }
+}
