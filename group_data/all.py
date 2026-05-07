@@ -44,6 +44,7 @@ raw_kopia_log_file = "/Users/vera/.local/kopia-backup/kopia-raw.log"
 status_file = "/Users/vera/.local/kopia-backup/status.json"
 
 app_name = "COPYA"
+app_install_dir = "/Applications"
 app_executable_name = "kopia-backup-monitor"
 app_bundle_identifier = "com.vera.kopia.monitor"
 legacy_monitor_app_names = [

@@ -299,6 +299,12 @@ struct StatusSnapshot: Codable {
     var last_start_at: String?
     var last_success_at: String?
     var last_success_cloud_coverage: String?
+    var backup_elapsed_seconds: Int?
+    var last_liveness_check_at: String?
+    var last_kopia_output_at: String?
+    var kopia_output_idle_seconds: Int?
+    var kopia_suppressed_dataless_read_errors: Int?
+    var kopia_other_output_read_errors: Int?
     var last_failure_at: String?
     var last_failure: String?
     var last_abort_reason: String?
@@ -321,6 +327,12 @@ struct StatusSnapshot: Codable {
         case last_start_at
         case last_success_at
         case last_success_cloud_coverage
+        case backup_elapsed_seconds
+        case last_liveness_check_at
+        case last_kopia_output_at
+        case kopia_output_idle_seconds
+        case kopia_suppressed_dataless_read_errors
+        case kopia_other_output_read_errors
         case last_failure_at
         case last_failure
         case last_abort_reason
@@ -346,6 +358,12 @@ struct StatusSnapshot: Codable {
         try encodeOptional(last_start_at, into: &container, forKey: .last_start_at)
         try encodeOptional(last_success_at, into: &container, forKey: .last_success_at)
         try encodeOptional(last_success_cloud_coverage, into: &container, forKey: .last_success_cloud_coverage)
+        try encodeOptional(backup_elapsed_seconds, into: &container, forKey: .backup_elapsed_seconds)
+        try encodeOptional(last_liveness_check_at, into: &container, forKey: .last_liveness_check_at)
+        try encodeOptional(last_kopia_output_at, into: &container, forKey: .last_kopia_output_at)
+        try encodeOptional(kopia_output_idle_seconds, into: &container, forKey: .kopia_output_idle_seconds)
+        try encodeOptional(kopia_suppressed_dataless_read_errors, into: &container, forKey: .kopia_suppressed_dataless_read_errors)
+        try encodeOptional(kopia_other_output_read_errors, into: &container, forKey: .kopia_other_output_read_errors)
         try encodeOptional(last_failure_at, into: &container, forKey: .last_failure_at)
         try encodeOptional(last_failure, into: &container, forKey: .last_failure)
         try encodeOptional(last_abort_reason, into: &container, forKey: .last_abort_reason)
@@ -656,6 +674,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var lastFailure: String?
     @Published var lastAbortReason: String?
     @Published var activePID: Int32?
+    @Published var livenessCheckAt = Date()
+    @Published var lastKopiaOutputAt: Date?
     @Published var protectedDataProbeResults: [ProtectedDataProbeResult] = []
     @Published var cloudMaterialization = CloudMaterializationSnapshot.empty()
     @Published var kopiaRanAfterMaterialization = false
@@ -1028,6 +1048,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         kopiaOutputBuffer = ""
         kopiaSuppressedDatalessReadErrors = 0
         kopiaOtherOutputReadErrors = 0
+        livenessCheckAt = Date()
+        lastKopiaOutputAt = nil
         stopReason = nil
         lastStartAt = Date()
         lastFailure = nil
@@ -1701,6 +1723,34 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return String(activePID)
     }
 
+    var backupLivenessText: String {
+        guard activeProcess != nil else {
+            return "idle"
+        }
+
+        let elapsed = durationText(since: lastStartAt, now: livenessCheckAt)
+        let heartbeatAge = relativeAgeText(since: livenessCheckAt, now: Date())
+        let outputText: String
+        if let lastKopiaOutputAt {
+            outputText = "output \(relativeAgeText(since: lastKopiaOutputAt, now: livenessCheckAt)) ago"
+        } else {
+            outputText = "output quiet"
+        }
+        return "running \(elapsed), checked \(heartbeatAge) ago, \(outputText)"
+    }
+
+    var kopiaNoiseText: String? {
+        guard activeProcess != nil else {
+            return nil
+        }
+
+        if kopiaSuppressedDatalessReadErrors == 0 && kopiaOtherOutputReadErrors == 0 {
+            return nil
+        }
+
+        return "dataless read noise: \(kopiaSuppressedDatalessReadErrors), other errors: \(kopiaOtherOutputReadErrors)"
+    }
+
     var cloudMaterializationText: String {
         if activeMaterializationID != nil {
             let phase = cloudMaterialization.current_phase ?? "running"
@@ -1732,8 +1782,38 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return "not run"
     }
 
+    private func durationText(since start: Date?, now: Date) -> String {
+        guard let start else {
+            return "0s"
+        }
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m \(seconds % 60)s"
+        }
+        let hours = minutes / 60
+        return "\(hours)h \(minutes % 60)m"
+    }
+
+    private func relativeAgeText(since date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        let hours = minutes / 60
+        return "\(hours)h \(minutes % 60)m"
+    }
+
     private func tick() {
         let now = Date()
+        livenessCheckAt = now
         let elapsed = now.timeIntervalSince(lastNetworkCheckAt)
         if elapsed >= TimeInterval(Config.networkCheckIntervalSeconds) {
             refreshNetwork(reason: "timer", shouldEvaluateSchedule: true)
@@ -1753,6 +1833,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             if !network.allowed {
                 stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
             }
+        }
+
+        if activeProcess != nil || activeMaterializationID != nil {
+            writeStatus()
         }
     }
 
@@ -2043,6 +2127,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             last_start_at: dateString(lastStartAt),
             last_success_at: dateString(lastSuccessAt),
             last_success_cloud_coverage: lastSuccessCloudCoverage,
+            backup_elapsed_seconds: activeProcess == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastStartAt ?? livenessCheckAt)),
+            last_liveness_check_at: activeProcess == nil && activeMaterializationID == nil ? nil : dateString(livenessCheckAt),
+            last_kopia_output_at: dateString(lastKopiaOutputAt),
+            kopia_output_idle_seconds: activeProcess == nil || lastKopiaOutputAt == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastKopiaOutputAt!)),
+            kopia_suppressed_dataless_read_errors: activeProcess == nil ? nil : kopiaSuppressedDatalessReadErrors,
+            kopia_other_output_read_errors: activeProcess == nil ? nil : kopiaOtherOutputReadErrors,
             last_failure_at: dateString(lastFailureAt),
             last_failure: lastFailure,
             last_abort_reason: lastAbortReason,
@@ -2111,6 +2201,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func processKopiaOutputText(_ text: String) {
+        lastKopiaOutputAt = Date()
         kopiaOutputBuffer += text.replacingOccurrences(of: "\r", with: "\n")
         while let newlineIndex = kopiaOutputBuffer.firstIndex(of: "\n") {
             let line = String(kopiaOutputBuffer[..<newlineIndex])
@@ -2313,6 +2404,12 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             last_start_at: nil,
             last_success_at: nil,
             last_success_cloud_coverage: nil,
+            backup_elapsed_seconds: nil,
+            last_liveness_check_at: nil,
+            last_kopia_output_at: nil,
+            kopia_output_idle_seconds: nil,
+            kopia_suppressed_dataless_read_errors: nil,
+            kopia_other_output_read_errors: nil,
             last_failure_at: nil,
             last_failure: nil,
             last_abort_reason: nil,
@@ -2407,6 +2504,12 @@ func printStatusJSONAndExit() -> Never {
         last_start_at: nil,
         last_success_at: nil,
         last_success_cloud_coverage: nil,
+        backup_elapsed_seconds: nil,
+        last_liveness_check_at: nil,
+        last_kopia_output_at: nil,
+        kopia_output_idle_seconds: nil,
+        kopia_suppressed_dataless_read_errors: nil,
+        kopia_other_output_read_errors: nil,
         last_failure_at: nil,
         last_failure: nil,
         last_abort_reason: nil,
@@ -2492,6 +2595,12 @@ struct KopiaBackupMonitorApp: App {
             Text("Last success: \(monitor.lastSuccessText)")
             Text("Next run: \(monitor.nextRunText)")
             Text("Active PID: \(monitor.activePIDText)")
+            if monitor.activePID != nil {
+                Text("Backup: \(monitor.backupLivenessText)")
+            }
+            if let kopiaNoise = monitor.kopiaNoiseText {
+                Text(kopiaNoise)
+            }
             Text("Cloud prep: \(monitor.cloudMaterializationText)")
             if let failure = monitor.lastFailure {
                 Divider()

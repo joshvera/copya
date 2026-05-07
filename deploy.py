@@ -37,6 +37,7 @@ log_file = data("log_file")
 raw_kopia_log_file = data("raw_kopia_log_file")
 status_file = data("status_file")
 app_name = data("app_name")
+app_install_dir = data("app_install_dir")
 app_executable_name = data("app_executable_name")
 app_bundle_identifier = data("app_bundle_identifier")
 legacy_monitor_app_names = data("legacy_monitor_app_names")
@@ -49,7 +50,7 @@ launch_agents_dir = f"{home}/Library/LaunchAgents"
 log_dir = log_file.rsplit("/", 1)[0]
 status_dir = status_file.rsplit("/", 1)[0]
 
-app_bundle_dir = f"{runner_dir}/{app_name}.app"
+app_bundle_dir = f"{app_install_dir}/{app_name}.app"
 app_contents_dir = f"{app_bundle_dir}/Contents"
 app_macos_dir = f"{app_contents_dir}/MacOS"
 app_resources_dir = f"{app_contents_dir}/Resources"
@@ -65,6 +66,10 @@ legacy_runner_path = f"{runner_dir}/kopia-safe-run.sh"
 legacy_helper_bundle_dir = f"{runner_dir}/Kopia WiFi SSID Helper.app"
 legacy_helper_source_path = f"{runner_dir}/kopia-wifi-ssid.swift"
 legacy_helper_stamp_path = f"{runner_dir}/kopia-wifi-ssid.sha256"
+legacy_local_app_bundle_dir = f"{runner_dir}/{app_name}.app"
+legacy_local_app_executable_path = (
+    f"{legacy_local_app_bundle_dir}/Contents/MacOS/{app_executable_name}"
+)
 legacy_monitor_app_bundle_dirs = [
     f"{runner_dir}/{legacy_app_name}.app"
     for legacy_app_name in legacy_monitor_app_names
@@ -78,6 +83,7 @@ template_context = {
     "app_bundle_identifier": app_bundle_identifier,
     "app_executable_name": app_executable_name,
     "app_executable_path": app_executable_path,
+    "app_install_dir": app_install_dir,
     "app_name": app_name,
     "backup_ignore_file": backup_ignore_file,
     "backup_ignore_patterns": backup_ignore_patterns,
@@ -126,6 +132,11 @@ server.shell(
             f'security find-identity -v -p codesigning | grep -F "{app_signing_identity}" '
             f'>/dev/null || (echo "Signing identity not found: {app_signing_identity}" '
             '>&2; exit 1)'
+        ),
+        (
+            f'test -w "{app_install_dir}" || '
+            f'(echo "Configured app install directory {app_install_dir} is not writable. '
+            f'Use an admin user or choose a user-writable app_install_dir." >&2; exit 1)'
         ),
     ],
 )
@@ -309,8 +320,10 @@ server.shell(
         f'osascript -e \'tell application id "{app_bundle_identifier}" to quit\' || true',
         "sleep 2",
         f'pkill -TERM -f "^{app_executable_path}( |$)" || true',
+        f'pkill -TERM -f "^{legacy_local_app_executable_path}( |$)" || true',
         "sleep 2",
         f'pkill -KILL -f "^{app_executable_path}( |$)" || true',
+        f'pkill -KILL -f "^{legacy_local_app_executable_path}( |$)" || true',
     ],
     _sudo=use_sudo,
 )
@@ -321,6 +334,7 @@ server.shell(
         " ".join(
             [
                 "rm -rf",
+                f'"{legacy_local_app_bundle_dir}"',
                 *[f'"{path}"' for path in legacy_monitor_app_bundle_dirs],
             ]
         ),

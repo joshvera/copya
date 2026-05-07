@@ -65,8 +65,10 @@ uv run pyinfra @local deploy.py
 The deploy:
 
 - installs `kopia` and `1password-cli`;
-- builds and signs `/Users/vera/.local/kopia-backup/COPYA.app`;
+- builds and signs `/Applications/COPYA.app`;
 - removes the legacy `com.vera.kopia.backup` runner LaunchAgent;
+- removes the old `/Users/vera/.local/kopia-backup/COPYA.app` bundle after
+  migration;
 - installs and bootstraps `com.vera.kopia.monitor`.
 
 The configured macOS user and home directory must already exist. This deploy
@@ -141,7 +143,7 @@ Apple Development: Joshua Vera (HBBYKPXNDM)
 Verify the installed app signature:
 
 ```bash
-codesign --verify --deep --strict "/Users/vera/.local/kopia-backup/COPYA.app"
+codesign --verify --deep --strict "/Applications/COPYA.app"
 ```
 
 Developer ID notarization is intentionally not part of this local setup yet.
@@ -152,8 +154,8 @@ The app uses CoreWLAN and Core Location permission to read the exact SSID.
 Grant Location Services from an interactive session:
 
 ```bash
-"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --request-location
-"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --request-location
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
 ```
 
 If macOS does not prompt, open System Settings -> Privacy & Security ->
@@ -173,8 +175,12 @@ Mail, Messages, Safari, and Photos libraries.
 Open System Settings -> Privacy & Security -> Full Disk Access and add:
 
 ```bash
-/Users/vera/.local/kopia-backup/COPYA.app
+/Applications/COPYA.app
 ```
+
+If you previously granted Full Disk Access to the old app bundle under
+`/Users/vera/.local/kopia-backup`, grant it again for `/Applications/COPYA.app`
+after redeploying.
 
 If COPYA still reports `Needs Full Disk Access` after granting it, add the
 Homebrew Kopia executable as a fallback because Kopia is the child process that
@@ -202,6 +208,8 @@ The menu bar app shows:
 - next scheduled run;
 - last successful backup;
 - active Kopia PID when syncing;
+- backup liveness while syncing: elapsed runtime, last monitor heartbeat, last
+  Kopia output age, and summarized dataless read noise;
 - last failure or abort reason.
 
 Menu actions include Start Backup Now, Stop Backup, Check Network, Grant Wi-Fi
@@ -216,8 +224,8 @@ The app writes status JSON here:
 Useful debug commands:
 
 ```bash
-"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --status-json
-"/Users/vera/.local/kopia-backup/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --status-json
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
 launchctl print gui/$(id -u)/com.vera.kopia.monitor
 pgrep -fl 'kopia-backup-monitor|kopia snapshot create'
 tail -f /Users/vera/Library/Logs/kopia-backup.log
