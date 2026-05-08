@@ -50,6 +50,17 @@ internal_kopia_log_dirs = [
 ]
 internal_kopia_log_mtime_tolerance_seconds = 10
 internal_kopia_log_tail_bytes = 131072
+kopia_activity_heartbeat_interval_seconds = 300
+kopia_internal_log_retention_bytes = 536870912
+minimum_execution_reserve_bytes = 53687091200
+critical_runtime_free_space_bytes = 21474836480
+unknown_icloud_placeholder_estimate_bytes = 268435456
+disk_free_space_check_paths = [
+    "/Users/vera/Library/Caches/kopia",
+    "/Users/vera/Library/Logs/kopia",
+    "/Users/vera/.local/kopia-backup/kopia-raw.log",
+    "/Users/vera",
+]
 allow_deploy_restart_while_backup_running = False
 onepassword_read_timeout_seconds = 60
 

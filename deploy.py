@@ -41,6 +41,12 @@ internal_kopia_activity_probe_enabled = bool_data("internal_kopia_activity_probe
 internal_kopia_log_dirs = data("internal_kopia_log_dirs")
 internal_kopia_log_mtime_tolerance_seconds = data("internal_kopia_log_mtime_tolerance_seconds")
 internal_kopia_log_tail_bytes = data("internal_kopia_log_tail_bytes")
+kopia_activity_heartbeat_interval_seconds = data("kopia_activity_heartbeat_interval_seconds")
+kopia_internal_log_retention_bytes = data("kopia_internal_log_retention_bytes")
+minimum_execution_reserve_bytes = data("minimum_execution_reserve_bytes")
+critical_runtime_free_space_bytes = data("critical_runtime_free_space_bytes")
+unknown_icloud_placeholder_estimate_bytes = data("unknown_icloud_placeholder_estimate_bytes")
+disk_free_space_check_paths = data("disk_free_space_check_paths")
 allow_deploy_restart_while_backup_running = bool_data("allow_deploy_restart_while_backup_running")
 app_name = data("app_name")
 app_install_dir = data("app_install_dir")
@@ -118,6 +124,12 @@ template_context = {
     "internal_kopia_log_dirs": internal_kopia_log_dirs,
     "internal_kopia_log_mtime_tolerance_seconds": internal_kopia_log_mtime_tolerance_seconds,
     "internal_kopia_log_tail_bytes": internal_kopia_log_tail_bytes,
+    "kopia_activity_heartbeat_interval_seconds": kopia_activity_heartbeat_interval_seconds,
+    "kopia_internal_log_retention_bytes": kopia_internal_log_retention_bytes,
+    "minimum_execution_reserve_bytes": minimum_execution_reserve_bytes,
+    "critical_runtime_free_space_bytes": critical_runtime_free_space_bytes,
+    "unknown_icloud_placeholder_estimate_bytes": unknown_icloud_placeholder_estimate_bytes,
+    "disk_free_space_check_paths": disk_free_space_check_paths,
     "config_user": user,
 }
 

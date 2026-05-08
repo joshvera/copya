@@ -44,6 +44,16 @@ enum Config {
     ]
     static let internalKopiaLogMtimeToleranceSeconds = {{ internal_kopia_log_mtime_tolerance_seconds }}
     static let internalKopiaLogTailBytes = {{ internal_kopia_log_tail_bytes }}
+    static let kopiaActivityHeartbeatIntervalSeconds = {{ kopia_activity_heartbeat_interval_seconds }}
+    static let kopiaInternalLogRetentionBytes: Int64 = {{ kopia_internal_log_retention_bytes }}
+    static let minimumExecutionReserveBytes: Int64 = {{ minimum_execution_reserve_bytes }}
+    static let criticalRuntimeFreeSpaceBytes: Int64 = {{ critical_runtime_free_space_bytes }}
+    static let unknownICloudPlaceholderEstimateBytes: Int64 = {{ unknown_icloud_placeholder_estimate_bytes }}
+    static let diskFreeSpaceCheckPaths: [String] = [
+{% for path in disk_free_space_check_paths %}
+        "{{ path }}",
+{% endfor %}
+    ]
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
     static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
@@ -108,6 +118,12 @@ struct ConfigSummary: Codable {
     var internal_kopia_log_dirs: [String]
     var internal_kopia_log_mtime_tolerance_seconds: Int
     var internal_kopia_log_tail_bytes: Int
+    var kopia_activity_heartbeat_interval_seconds: Int
+    var kopia_internal_log_retention_bytes: Int64
+    var minimum_execution_reserve_bytes: Int64
+    var critical_runtime_free_space_bytes: Int64
+    var unknown_icloud_placeholder_estimate_bytes: Int64
+    var disk_free_space_check_paths: [String]
 }
 
 extension ConfigSummary {
@@ -137,6 +153,12 @@ extension ConfigSummary {
         case internal_kopia_log_dirs
         case internal_kopia_log_mtime_tolerance_seconds
         case internal_kopia_log_tail_bytes
+        case kopia_activity_heartbeat_interval_seconds
+        case kopia_internal_log_retention_bytes
+        case minimum_execution_reserve_bytes
+        case critical_runtime_free_space_bytes
+        case unknown_icloud_placeholder_estimate_bytes
+        case disk_free_space_check_paths
     }
 
     init(from decoder: Decoder) throws {
@@ -166,6 +188,12 @@ extension ConfigSummary {
         internal_kopia_log_dirs = try container.decodeIfPresent([String].self, forKey: .internal_kopia_log_dirs) ?? Config.internalKopiaLogDirs
         internal_kopia_log_mtime_tolerance_seconds = try container.decodeIfPresent(Int.self, forKey: .internal_kopia_log_mtime_tolerance_seconds) ?? Config.internalKopiaLogMtimeToleranceSeconds
         internal_kopia_log_tail_bytes = try container.decodeIfPresent(Int.self, forKey: .internal_kopia_log_tail_bytes) ?? Config.internalKopiaLogTailBytes
+        kopia_activity_heartbeat_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .kopia_activity_heartbeat_interval_seconds) ?? Config.kopiaActivityHeartbeatIntervalSeconds
+        kopia_internal_log_retention_bytes = try container.decodeIfPresent(Int64.self, forKey: .kopia_internal_log_retention_bytes) ?? Config.kopiaInternalLogRetentionBytes
+        minimum_execution_reserve_bytes = try container.decodeIfPresent(Int64.self, forKey: .minimum_execution_reserve_bytes) ?? Config.minimumExecutionReserveBytes
+        critical_runtime_free_space_bytes = try container.decodeIfPresent(Int64.self, forKey: .critical_runtime_free_space_bytes) ?? Config.criticalRuntimeFreeSpaceBytes
+        unknown_icloud_placeholder_estimate_bytes = try container.decodeIfPresent(Int64.self, forKey: .unknown_icloud_placeholder_estimate_bytes) ?? Config.unknownICloudPlaceholderEstimateBytes
+        disk_free_space_check_paths = try container.decodeIfPresent([String].self, forKey: .disk_free_space_check_paths) ?? Config.diskFreeSpaceCheckPaths
     }
 }
 
@@ -179,6 +207,110 @@ struct NetworkSnapshot: Codable {
     var is_expensive: Bool
     var is_constrained: Bool
     var deny_ssids: [String]
+}
+
+struct DiskSpaceCheckResult: Codable {
+    var path: String
+    var checked_path: String
+    var volume_key: String?
+    var free_bytes: Int64?
+    var required_bytes: Int64
+    var threshold_kind: String
+    var ok: Bool
+    var error: String?
+}
+
+struct DiskHealthSnapshot: Codable {
+    var checked_at: String?
+    var ok: Bool
+    var threshold_kind: String
+    var required_bytes: Int64
+    var failing_path: String?
+    var failing_free_bytes: Int64?
+    var reason: String?
+    var results: [DiskSpaceCheckResult]
+
+    static func unknown() -> DiskHealthSnapshot {
+        DiskHealthSnapshot(
+            checked_at: nil,
+            ok: true,
+            threshold_kind: "unknown",
+            required_bytes: 0,
+            failing_path: nil,
+            failing_free_bytes: nil,
+            reason: nil,
+            results: []
+        )
+    }
+}
+
+struct CloudCapacityRootEstimate: Codable {
+    var root: String
+    var exists: Bool
+    var provider: String
+    var volume_key: String?
+    var dataless_placeholders: Int
+    var icloud_known_bytes: Int64
+    var icloud_unknown_count: Int
+    var icloud_unknown_fallback_bytes: Int64
+    var fileprovider_advisory_known_bytes: Int64
+    var fileprovider_advisory_unknown_count: Int
+    var local_unknown_count: Int
+    var sample_paths: [String]
+    var errors: [String]
+}
+
+struct CloudCapacityVolumeEstimate: Codable {
+    var volume_key: String
+    var checked_path: String
+    var available_bytes: Int64?
+    var required_bytes: Int64
+    var execution_reserve_bytes: Int64
+    var icloud_known_bytes: Int64
+    var icloud_unknown_fallback_bytes: Int64
+    var ok: Bool
+    var capacity_api: String
+    var error: String?
+}
+
+struct CloudCapacityEstimate: Codable {
+    var checked_at: String?
+    var ok: Bool
+    var confidence: String
+    var reason: String?
+    var execution_reserve_bytes: Int64
+    var unknown_icloud_placeholder_estimate_bytes: Int64
+    var icloud_known_bytes: Int64
+    var icloud_unknown_count: Int
+    var icloud_unknown_fallback_bytes: Int64
+    var fileprovider_advisory_known_bytes: Int64
+    var fileprovider_advisory_unknown_count: Int
+    var local_unknown_count: Int
+    var capacity_api: String
+    var warnings: [String]
+    var roots: [CloudCapacityRootEstimate]
+    var volumes: [CloudCapacityVolumeEstimate]
+
+    static func unknown() -> CloudCapacityEstimate {
+        CloudCapacityEstimate(
+            checked_at: nil,
+            ok: true,
+            confidence: "unknown",
+            reason: nil,
+            execution_reserve_bytes: Config.minimumExecutionReserveBytes,
+            unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+            icloud_known_bytes: 0,
+            icloud_unknown_count: 0,
+            icloud_unknown_fallback_bytes: 0,
+            fileprovider_advisory_known_bytes: 0,
+            fileprovider_advisory_unknown_count: 0,
+            local_unknown_count: 0,
+            capacity_api: "unknown",
+            warnings: [],
+            roots: [],
+            volumes: []
+        )
+    }
 }
 
 struct ProtectedDataProbeResult: Codable {
@@ -338,7 +470,11 @@ struct StatusSnapshot: Codable {
     var kopia_activity: InternalKopiaActivitySnapshot?
     var kopia_suppressed_dataless_read_errors: Int?
     var kopia_other_output_read_errors: Int?
+    var disk_health: DiskHealthSnapshot?
+    var cloud_capacity_estimate: CloudCapacityEstimate?
     var last_failure_at: String?
+    var last_failure_kind: String?
+    var last_failure_detail: String?
     var last_failure: String?
     var last_abort_reason: String?
     var protected_data_probe_results: [ProtectedDataProbeResult]?
@@ -374,7 +510,11 @@ struct StatusSnapshot: Codable {
         case kopia_activity
         case kopia_suppressed_dataless_read_errors
         case kopia_other_output_read_errors
+        case disk_health
+        case cloud_capacity_estimate
         case last_failure_at
+        case last_failure_kind
+        case last_failure_detail
         case last_failure
         case last_abort_reason
         case protected_data_probe_results
@@ -413,7 +553,11 @@ struct StatusSnapshot: Codable {
         try encodeOptional(kopia_activity, into: &container, forKey: .kopia_activity)
         try encodeOptional(kopia_suppressed_dataless_read_errors, into: &container, forKey: .kopia_suppressed_dataless_read_errors)
         try encodeOptional(kopia_other_output_read_errors, into: &container, forKey: .kopia_other_output_read_errors)
+        try encodeOptional(disk_health, into: &container, forKey: .disk_health)
+        try encodeOptional(cloud_capacity_estimate, into: &container, forKey: .cloud_capacity_estimate)
         try encodeOptional(last_failure_at, into: &container, forKey: .last_failure_at)
+        try encodeOptional(last_failure_kind, into: &container, forKey: .last_failure_kind)
+        try encodeOptional(last_failure_detail, into: &container, forKey: .last_failure_detail)
         try encodeOptional(last_failure, into: &container, forKey: .last_failure)
         try encodeOptional(last_abort_reason, into: &container, forKey: .last_abort_reason)
         try encodeOptional(protected_data_probe_results, into: &container, forKey: .protected_data_probe_results)
@@ -443,6 +587,7 @@ enum BackupState: String {
     case paused
     case needsPermission = "needs_permission"
     case needsFullDiskAccess = "needs_full_disk_access"
+    case needsDiskSpace = "needs_disk_space"
     case cloudDownloadBlocked = "cloud_download_blocked"
     case cloudPartial = "cloud_partial"
     case failed
@@ -1320,17 +1465,664 @@ enum ProcessReconciler {
     }
 }
 
+struct VolumeCapacitySnapshot {
+    var volume_key: String
+    var checked_path: String
+    var available_bytes: Int64?
+    var capacity_api: String
+    var error: String?
+}
+
+enum DiskSpaceProbe {
+    static func snapshot(
+        paths: [String],
+        requiredBytes: Int64,
+        thresholdKind: String
+    ) -> DiskHealthSnapshot {
+        let results = paths.map { path in
+            check(path: path, requiredBytes: requiredBytes, thresholdKind: thresholdKind)
+        }
+        let failing = results.first { !$0.ok }
+        return DiskHealthSnapshot(
+            checked_at: DateFormatters.iso.string(from: Date()),
+            ok: failing == nil,
+            threshold_kind: thresholdKind,
+            required_bytes: requiredBytes,
+            failing_path: failing?.path,
+            failing_free_bytes: failing?.free_bytes,
+            reason: failing.map(diskFailureReason),
+            results: results
+        )
+    }
+
+    private static func check(
+        path: String,
+        requiredBytes: Int64,
+        thresholdKind: String
+    ) -> DiskSpaceCheckResult {
+        let snapshot = volumeSnapshot(for: path, preferImportantUsage: false)
+        let ok = snapshot.available_bytes.map { $0 >= requiredBytes } ?? false
+        return DiskSpaceCheckResult(
+            path: path,
+            checked_path: snapshot.checked_path,
+            volume_key: snapshot.volume_key,
+            free_bytes: snapshot.available_bytes,
+            required_bytes: requiredBytes,
+            threshold_kind: thresholdKind,
+            ok: ok,
+            error: snapshot.error ?? (snapshot.available_bytes == nil ? "free space unavailable" : nil)
+        )
+    }
+
+    static func volumeSnapshot(for path: String, preferImportantUsage: Bool = true) -> VolumeCapacitySnapshot {
+        let checkedPath = nearestExistingPath(for: path)
+        let url = URL(fileURLWithPath: checkedPath)
+        var resourceVolumeKey: String?
+        var importantBytes: Int64?
+        if preferImportantUsage,
+           let values = try? url.resourceValues(forKeys: [.volumeIdentifierKey, .volumeAvailableCapacityForImportantUsageKey]) {
+            resourceVolumeKey = values.volumeIdentifier.map { String(describing: $0) }
+            importantBytes = values.volumeAvailableCapacityForImportantUsage
+        }
+
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: checkedPath)
+            let filesystemBytes = int64Value(attributes[.systemFreeSize])
+            let filesystemVolumeKey = attributes[.systemNumber].map { String(describing: $0) }
+            let volumeKey = resourceVolumeKey ?? filesystemVolumeKey ?? checkedPath
+            if let importantBytes {
+                return VolumeCapacitySnapshot(
+                    volume_key: volumeKey,
+                    checked_path: checkedPath,
+                    available_bytes: importantBytes,
+                    capacity_api: "important_usage",
+                    error: nil
+                )
+            }
+            return VolumeCapacitySnapshot(
+                volume_key: volumeKey,
+                checked_path: checkedPath,
+                available_bytes: filesystemBytes,
+                capacity_api: "filesystem_fallback",
+                error: filesystemBytes == nil ? "free space unavailable" : nil
+            )
+        } catch {
+            if let importantBytes {
+                return VolumeCapacitySnapshot(
+                    volume_key: resourceVolumeKey ?? checkedPath,
+                    checked_path: checkedPath,
+                    available_bytes: importantBytes,
+                    capacity_api: "important_usage",
+                    error: nil
+                )
+            }
+            return VolumeCapacitySnapshot(
+                volume_key: resourceVolumeKey ?? checkedPath,
+                checked_path: checkedPath,
+                available_bytes: nil,
+                capacity_api: "unavailable",
+                error: error.localizedDescription
+            )
+        }
+    }
+
+    static func nearestExistingPath(for path: String) -> String {
+        let fileManager = FileManager.default
+        var url = URL(fileURLWithPath: path)
+        if fileManager.fileExists(atPath: url.path) {
+            return url.path
+        }
+
+        while url.path != "/" {
+            url.deleteLastPathComponent()
+            if fileManager.fileExists(atPath: url.path) {
+                return url.path
+            }
+        }
+        return "/"
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64? {
+        if let value = value as? NSNumber {
+            return value.int64Value
+        }
+        if let value = value as? Int64 {
+            return value
+        }
+        if let value = value as? Int {
+            return Int64(value)
+        }
+        return nil
+    }
+
+    private static func diskFailureReason(_ result: DiskSpaceCheckResult) -> String {
+        if let freeBytes = result.free_bytes {
+            return "only \(freeBytes) bytes free for \(result.path); requires \(result.required_bytes) bytes"
+        }
+        if let error = result.error {
+            return "unable to read free space for \(result.path): \(error)"
+        }
+        return "unable to read free space for \(result.path)"
+    }
+}
+
+struct CloudCapacityVolumeAccumulator {
+    var volumeKey: String
+    var checkedPath: String
+    var availableBytes: Int64?
+    var capacityAPI: String
+    var error: String?
+    var executionReserveBytes: Int64 = 0
+    var iCloudKnownBytes: Int64 = 0
+    var iCloudUnknownFallbackBytes: Int64 = 0
+
+    var requiredBytes: Int64 {
+        executionReserveBytes + iCloudKnownBytes + iCloudUnknownFallbackBytes
+    }
+
+    var ok: Bool {
+        guard let availableBytes else {
+            return false
+        }
+        return availableBytes >= requiredBytes
+    }
+}
+
+enum CloudCapacityEstimator {
+    static func estimate(
+        roots: [String],
+        executionPaths: [String]
+    ) -> CloudCapacityEstimate {
+        var volumeAccumulators: [String: CloudCapacityVolumeAccumulator] = [:]
+        var rootEstimates: [CloudCapacityRootEstimate] = []
+
+        for path in executionPaths {
+            var accumulator = accumulatorForPath(path, in: &volumeAccumulators)
+            accumulator.executionReserveBytes = max(accumulator.executionReserveBytes, Config.minimumExecutionReserveBytes)
+            volumeAccumulators[accumulator.volumeKey] = accumulator
+        }
+
+        for root in roots {
+            rootEstimates.append(estimateRoot(root, volumeAccumulators: &volumeAccumulators))
+        }
+
+        let volumes = volumeAccumulators.values
+            .sorted { $0.volumeKey < $1.volumeKey }
+            .map { accumulator in
+                CloudCapacityVolumeEstimate(
+                    volume_key: accumulator.volumeKey,
+                    checked_path: accumulator.checkedPath,
+                    available_bytes: accumulator.availableBytes,
+                    required_bytes: accumulator.requiredBytes,
+                    execution_reserve_bytes: accumulator.executionReserveBytes,
+                    icloud_known_bytes: accumulator.iCloudKnownBytes,
+                    icloud_unknown_fallback_bytes: accumulator.iCloudUnknownFallbackBytes,
+                    ok: accumulator.ok,
+                    capacity_api: accumulator.capacityAPI,
+                    error: accumulator.error
+                )
+            }
+
+        let iCloudKnownBytes = rootEstimates.reduce(Int64(0)) { $0 + $1.icloud_known_bytes }
+        let iCloudUnknownCount = rootEstimates.reduce(0) { $0 + $1.icloud_unknown_count }
+        let iCloudUnknownFallbackBytes = rootEstimates.reduce(Int64(0)) { $0 + $1.icloud_unknown_fallback_bytes }
+        let fileProviderKnownBytes = rootEstimates.reduce(Int64(0)) { $0 + $1.fileprovider_advisory_known_bytes }
+        let fileProviderUnknownCount = rootEstimates.reduce(0) { $0 + $1.fileprovider_advisory_unknown_count }
+        let localUnknownCount = rootEstimates.reduce(0) { $0 + $1.local_unknown_count }
+        let failingVolume = volumes.first { !$0.ok }
+        var warnings: [String] = []
+        if iCloudUnknownCount > 0 {
+            warnings.append("icloud_unknown_sizes_fallback")
+        }
+        if fileProviderKnownBytes > 0 || fileProviderUnknownCount > 0 {
+            warnings.append("fileprovider_advisory_placeholders")
+        }
+        if localUnknownCount > 0 {
+            warnings.append("local_unknown_placeholders")
+        }
+        if volumes.contains(where: { $0.capacity_api == "filesystem_fallback" }) {
+            warnings.append("capacity_filesystem_fallback")
+        }
+        if volumes.contains(where: { $0.capacity_api == "unavailable" }) {
+            warnings.append("capacity_unavailable")
+        }
+
+        let ok = failingVolume == nil
+        let confidence: String
+        if !ok {
+            confidence = "insufficient"
+        } else if warnings.isEmpty {
+            confidence = "high"
+        } else {
+            confidence = "degraded"
+        }
+
+        return CloudCapacityEstimate(
+            checked_at: DateFormatters.iso.string(from: Date()),
+            ok: ok,
+            confidence: confidence,
+            reason: failingVolume.map(capacityFailureReason),
+            execution_reserve_bytes: Config.minimumExecutionReserveBytes,
+            unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+            icloud_known_bytes: iCloudKnownBytes,
+            icloud_unknown_count: iCloudUnknownCount,
+            icloud_unknown_fallback_bytes: iCloudUnknownFallbackBytes,
+            fileprovider_advisory_known_bytes: fileProviderKnownBytes,
+            fileprovider_advisory_unknown_count: fileProviderUnknownCount,
+            local_unknown_count: localUnknownCount,
+            capacity_api: capacityAPISummary(volumes),
+            warnings: warnings,
+            roots: rootEstimates,
+            volumes: volumes
+        )
+    }
+
+    private static func estimateRoot(
+        _ root: String,
+        volumeAccumulators: inout [String: CloudCapacityVolumeAccumulator]
+    ) -> CloudCapacityRootEstimate {
+        let rootURL = URL(fileURLWithPath: root)
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory)
+        var provider = providerClass(forRoot: root)
+        var datalessPlaceholders = 0
+        var iCloudKnownBytes: Int64 = 0
+        var iCloudUnknownCount = 0
+        var fileProviderKnownBytes: Int64 = 0
+        var fileProviderUnknownCount = 0
+        var localUnknownCount = 0
+        var samplePaths: [String] = []
+        var errors: [String] = []
+        let rootVolume = DiskSpaceProbe.volumeSnapshot(for: root)
+
+        func rememberSample(_ path: String) {
+            if samplePaths.count < 5 {
+                samplePaths.append(path)
+            }
+        }
+
+        func rememberError(_ message: String) {
+            if errors.count < 5 {
+                errors.append(message)
+            }
+        }
+
+        guard exists else {
+            return CloudCapacityRootEstimate(
+                root: root,
+                exists: false,
+                provider: provider,
+                volume_key: rootVolume.volume_key,
+                dataless_placeholders: 0,
+                icloud_known_bytes: 0,
+                icloud_unknown_count: 0,
+                icloud_unknown_fallback_bytes: 0,
+                fileprovider_advisory_known_bytes: 0,
+                fileprovider_advisory_unknown_count: 0,
+                local_unknown_count: 0,
+                sample_paths: [],
+                errors: []
+            )
+        }
+
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .isUbiquitousItemKey,
+            .volumeIdentifierKey,
+        ]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: Array(keys),
+            options: [],
+            errorHandler: { url, error in
+                rememberError("\(url.path): \(error.localizedDescription)")
+                return true
+            }
+        ) else {
+            rememberError("unable to enumerate \(root)")
+            return CloudCapacityRootEstimate(
+                root: root,
+                exists: true,
+                provider: provider,
+                volume_key: rootVolume.volume_key,
+                dataless_placeholders: 0,
+                icloud_known_bytes: 0,
+                icloud_unknown_count: 0,
+                icloud_unknown_fallback_bytes: 0,
+                fileprovider_advisory_known_bytes: 0,
+                fileprovider_advisory_unknown_count: 0,
+                local_unknown_count: 0,
+                sample_paths: [],
+                errors: errors
+            )
+        }
+
+        for case let url as URL in enumerator {
+            let statSnapshot = FileFlags.snapshot(for: url)
+            guard let statSnapshot, (statSnapshot.flags & 0x40000000) != 0 else {
+                continue
+            }
+
+            let values = try? url.resourceValues(forKeys: keys)
+            if values?.isRegularFile == false {
+                continue
+            }
+
+            datalessPlaceholders += 1
+            rememberSample(url.path)
+            let fileProvider = providerClass(for: url, root: root, values: values)
+            if fileProvider == "icloud_actionable" {
+                provider = "icloud_actionable"
+                let fileVolume = DiskSpaceProbe.volumeSnapshot(for: url.path)
+                var accumulator = accumulatorForVolume(
+                    fileVolume.volume_key,
+                    fallbackPath: fileVolume.checked_path,
+                    volumeAccumulators: &volumeAccumulators
+                )
+                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
+                    iCloudKnownBytes += logicalBytes
+                    accumulator.iCloudKnownBytes += logicalBytes
+                } else {
+                    iCloudUnknownCount += 1
+                    accumulator.iCloudUnknownFallbackBytes += Config.unknownICloudPlaceholderEstimateBytes
+                }
+                volumeAccumulators[accumulator.volumeKey] = accumulator
+            } else if fileProvider == "fileprovider_advisory" {
+                provider = provider == "icloud_actionable" ? provider : "fileprovider_advisory"
+                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
+                    fileProviderKnownBytes += logicalBytes
+                } else {
+                    fileProviderUnknownCount += 1
+                }
+            } else {
+                localUnknownCount += 1
+            }
+        }
+
+        return CloudCapacityRootEstimate(
+            root: root,
+            exists: true,
+            provider: provider,
+            volume_key: rootVolume.volume_key,
+            dataless_placeholders: datalessPlaceholders,
+            icloud_known_bytes: iCloudKnownBytes,
+            icloud_unknown_count: iCloudUnknownCount,
+            icloud_unknown_fallback_bytes: Int64(iCloudUnknownCount) * Config.unknownICloudPlaceholderEstimateBytes,
+            fileprovider_advisory_known_bytes: fileProviderKnownBytes,
+            fileprovider_advisory_unknown_count: fileProviderUnknownCount,
+            local_unknown_count: localUnknownCount,
+            sample_paths: samplePaths,
+            errors: errors
+        )
+    }
+
+    private static func providerClass(forRoot root: String) -> String {
+        if root.contains("/Library/Mobile Documents") {
+            return "icloud_actionable"
+        }
+        if root.contains("/Library/CloudStorage") {
+            return "fileprovider_advisory"
+        }
+        return "local_unknown"
+    }
+
+    private static func providerClass(for url: URL, root: String, values: URLResourceValues?) -> String {
+        if values?.isUbiquitousItem == true || root.contains("/Library/Mobile Documents") {
+            return "icloud_actionable"
+        }
+        if url.path.contains("/Library/CloudStorage/") || root.contains("/Library/CloudStorage") {
+            return "fileprovider_advisory"
+        }
+        return "local_unknown"
+    }
+
+    private static func logicalSize(values: URLResourceValues?, statSnapshot: FileFlags.Snapshot) -> Int64? {
+        if let fileSize = values?.fileSize, fileSize >= 0 {
+            return Int64(fileSize)
+        }
+        if statSnapshot.size > 0 {
+            return statSnapshot.size
+        }
+        return nil
+    }
+
+    private static func accumulatorForPath(
+        _ path: String,
+        in accumulators: inout [String: CloudCapacityVolumeAccumulator]
+    ) -> CloudCapacityVolumeAccumulator {
+        let snapshot = DiskSpaceProbe.volumeSnapshot(for: path)
+        return accumulatorForVolume(
+            snapshot.volume_key,
+            fallbackPath: snapshot.checked_path,
+            volumeAccumulators: &accumulators
+        )
+    }
+
+    private static func accumulatorForVolume(
+        _ volumeKey: String,
+        fallbackPath: String,
+        volumeAccumulators: inout [String: CloudCapacityVolumeAccumulator]
+    ) -> CloudCapacityVolumeAccumulator {
+        if let existing = volumeAccumulators[volumeKey] {
+            return existing
+        }
+        let snapshot = DiskSpaceProbe.volumeSnapshot(for: fallbackPath)
+        let accumulator = CloudCapacityVolumeAccumulator(
+            volumeKey: volumeKey,
+            checkedPath: snapshot.checked_path,
+            availableBytes: snapshot.available_bytes,
+            capacityAPI: snapshot.capacity_api,
+            error: snapshot.error
+        )
+        volumeAccumulators[volumeKey] = accumulator
+        return accumulator
+    }
+
+    private static func capacityFailureReason(_ volume: CloudCapacityVolumeEstimate) -> String {
+        if let availableBytes = volume.available_bytes {
+            return "only \(availableBytes) bytes available on \(volume.checked_path); requires \(volume.required_bytes) bytes"
+        }
+        if let error = volume.error {
+            return "unable to read available capacity for \(volume.checked_path): \(error)"
+        }
+        return "unable to read available capacity for \(volume.checked_path)"
+    }
+
+    private static func capacityAPISummary(_ volumes: [CloudCapacityVolumeEstimate]) -> String {
+        if volumes.contains(where: { $0.capacity_api == "unavailable" }) {
+            return "unavailable"
+        }
+        if volumes.contains(where: { $0.capacity_api == "filesystem_fallback" }) {
+            return "filesystem_fallback"
+        }
+        if volumes.isEmpty {
+            return "unknown"
+        }
+        return "important_usage"
+    }
+}
+
+struct KopiaFailureClassification {
+    var kind: String
+    var message: String
+    var detail: String
+    var priority: Int
+}
+
+enum KopiaFailureClassifier {
+    static func classify(line: String) -> KopiaFailureClassification? {
+        let lower = line.lowercased()
+        if lower.contains("no space left on device") {
+            return KopiaFailureClassification(
+                kind: "disk_space_exhausted",
+                message: "Kopia ran out of local disk space",
+                detail: line,
+                priority: 100
+            )
+        }
+        if lower.contains("storage_cap_exceeded") {
+            return KopiaFailureClassification(
+                kind: "b2_storage_cap_exceeded",
+                message: "B2 storage cap exceeded",
+                detail: line,
+                priority: 90
+            )
+        }
+        if line.contains("Error when processing")
+            && (lower.contains("operation not permitted") || lower.contains("permission denied")) {
+            return KopiaFailureClassification(
+                kind: "file_read_failure",
+                message: "Kopia reported file read failures",
+                detail: line,
+                priority: 50
+            )
+        }
+        return nil
+    }
+
+    static func generic(status: Int32) -> KopiaFailureClassification {
+        KopiaFailureClassification(
+            kind: "kopia_exit_status",
+            message: "Kopia exited with status \(status)",
+            detail: "status=\(status)",
+            priority: 0
+        )
+    }
+}
+
+struct KopiaLogPruneSummary {
+    var removed_count: Int
+    var removed_bytes: Int64
+    var kept_inactive_bytes: Int64
+    var preserved_live_count: Int
+}
+
+enum KopiaDiagnosticLogPruner {
+    private struct LogFile {
+        var url: URL
+        var size: Int64
+        var modifiedAt: Date
+        var pid: Int32?
+    }
+
+    static func prune(
+        logDirs: [String],
+        retentionBytes: Int64,
+        preservePIDs: Set<Int32>
+    ) -> KopiaLogPruneSummary {
+        guard retentionBytes > 0 else {
+            return KopiaLogPruneSummary(
+                removed_count: 0,
+                removed_bytes: 0,
+                kept_inactive_bytes: 0,
+                preserved_live_count: 0
+            )
+        }
+
+        let livePIDs = preservePIDs.union(Set(ProcessInspector.matchingKopiaSnapshots().map(\.pid)))
+        let files = logDirs.flatMap(logFiles(in:))
+        let preserved = files.filter { file in
+            guard let pid = file.pid else {
+                return false
+            }
+            return livePIDs.contains(pid)
+        }
+        let candidates = files
+            .filter { file in
+                guard let pid = file.pid else {
+                    return true
+                }
+                return !livePIDs.contains(pid)
+            }
+            .sorted { left, right in
+                left.modifiedAt > right.modifiedAt
+            }
+
+        var keptBytes: Int64 = 0
+        var removedCount = 0
+        var removedBytes: Int64 = 0
+        for file in candidates {
+            if keptBytes + file.size <= retentionBytes {
+                keptBytes += file.size
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(at: file.url)
+                removedCount += 1
+                removedBytes += file.size
+            } catch {
+                continue
+            }
+        }
+
+        return KopiaLogPruneSummary(
+            removed_count: removedCount,
+            removed_bytes: removedBytes,
+            kept_inactive_bytes: keptBytes,
+            preserved_live_count: preserved.count
+        )
+    }
+
+    private static func logFiles(in dir: String) -> [LogFile] {
+        let url = URL(fileURLWithPath: dir)
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+            options: []
+        ) else {
+            return []
+        }
+
+        return urls.compactMap { fileURL in
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                  values.isRegularFile == true else {
+                return nil
+            }
+            return LogFile(
+                url: fileURL,
+                size: Int64(values.fileSize ?? 0),
+                modifiedAt: values.contentModificationDate ?? Date.distantPast,
+                pid: pid(from: fileURL.lastPathComponent)
+            )
+        }
+    }
+
+    private static func pid(from filename: String) -> Int32? {
+        let parts = filename.split(separator: "-")
+        guard parts.count >= 5,
+              parts[0] == "kopia",
+              parts[4] == "snapshot",
+              let pid = Int32(parts[3]) else {
+            return nil
+        }
+        return pid
+    }
+}
+
 enum FileFlags {
     private static let sfDataless = UInt32(0x40000000)
 
-    static func flags(for url: URL) -> UInt32? {
+    struct Snapshot {
+        var flags: UInt32
+        var size: Int64
+    }
+
+    static func snapshot(for url: URL) -> Snapshot? {
         url.path.withCString { path in
             var statBuffer = stat()
             guard lstat(path, &statBuffer) == 0 else {
                 return nil
             }
-            return statBuffer.st_flags
+            return Snapshot(
+                flags: statBuffer.st_flags,
+                size: Int64(statBuffer.st_size)
+            )
         }
+    }
+
+    static func flags(for url: URL) -> UInt32? {
+        snapshot(for: url)?.flags
     }
 
     static func isDataless(_ url: URL) -> Bool {
@@ -1352,6 +2144,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var lastSuccessCloudCoverage: String?
     @Published var lastFailureAt: Date?
     @Published var lastFailure: String?
+    @Published var lastFailureKind: String?
+    @Published var lastFailureDetail: String?
     @Published var lastAbortReason: String?
     @Published var activePID: Int32?
     @Published var activeOperation: String?
@@ -1366,6 +2160,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var protectedDataProbeResults: [ProtectedDataProbeResult] = []
     @Published var cloudMaterialization = CloudMaterializationSnapshot.empty()
     @Published var kopiaRanAfterMaterialization = false
+    @Published var diskHealth = DiskHealthSnapshot.unknown()
+    @Published var cloudCapacityEstimate = CloudCapacityEstimate.unknown()
 
     private let locationManager = CLLocationManager()
     private let pathMonitor = NWPathMonitor()
@@ -1386,6 +2182,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var kopiaOutputBuffer = ""
     private var kopiaSuppressedDatalessReadErrors = 0
     private var kopiaOtherOutputReadErrors = 0
+    private var observedKopiaFailure: KopiaFailureClassification?
     private var activeMaterializationID: UUID?
     private var stopReason: String?
     private var lastNetworkCheckAt = Date.distantPast
@@ -1397,6 +2194,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var cloudDownloadBlocked = false
     private var lastKopiaActivityHeartbeatLogAt: Date?
     private var lastKopiaActivityHeartbeatSummary: String?
+    private var stopFailureKind: String?
+    private var stopFailureDetail: String?
 
     private override init() {
         super.init()
@@ -1501,7 +2300,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         let summary = snapshot.summary ?? snapshot.unavailable_reason ?? snapshot.confidence
         let shouldLogStateChange = summary != lastKopiaActivityHeartbeatSummary
         let shouldLogInterval = lastKopiaActivityHeartbeatLogAt == nil
-            || now.timeIntervalSince(lastKopiaActivityHeartbeatLogAt!) >= 180
+            || now.timeIntervalSince(lastKopiaActivityHeartbeatLogAt!) >= TimeInterval(Config.kopiaActivityHeartbeatIntervalSeconds)
 
         guard shouldLogStateChange || shouldLogInterval else {
             return
@@ -1544,6 +2343,47 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         activeOperation = nil
         activeOperationStartedAt = nil
         activeOperationDetail = nil
+    }
+
+    @discardableResult
+    private func refreshDiskHealth(
+        requiredBytes: Int64,
+        thresholdKind: String
+    ) -> DiskHealthSnapshot {
+        let snapshot = DiskSpaceProbe.snapshot(
+            paths: Config.diskFreeSpaceCheckPaths,
+            requiredBytes: requiredBytes,
+            thresholdKind: thresholdKind
+        )
+        diskHealth = snapshot
+        return snapshot
+    }
+
+    private func recordDiskSpaceFailure(
+        _ health: DiskHealthSnapshot,
+        message: String
+    ) {
+        let detail = health.reason ?? "disk space check failed"
+        recordFailure(
+            "\(message): \(detail)",
+            kind: "disk_space_exhausted",
+            detail: detail
+        )
+    }
+
+    private func pruneInactiveKopiaDiagnosticLogs(
+        preservePIDs: Set<Int32>,
+        reason: String
+    ) {
+        let summary = KopiaDiagnosticLogPruner.prune(
+            logDirs: Config.internalKopiaLogDirs,
+            retentionBytes: Config.kopiaInternalLogRetentionBytes,
+            preservePIDs: preservePIDs
+        )
+        guard summary.removed_count > 0 else {
+            return
+        }
+        appendLog("kopia diagnostic log prune reason=\(reason) removed_files=\(summary.removed_count) removed_bytes=\(summary.removed_bytes) kept_inactive_bytes=\(summary.kept_inactive_bytes) preserved_live_files=\(summary.preserved_live_count)")
     }
 
     private func markMaterializationCancelled(_ id: UUID) {
@@ -1709,6 +2549,18 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
+        let startDiskHealth = refreshDiskHealth(
+            requiredBytes: Config.minimumExecutionReserveBytes,
+            thresholdKind: "start"
+        )
+        guard startDiskHealth.ok else {
+            recordDiskSpaceFailure(
+                startDiskHealth,
+                message: "Insufficient local disk space to start Kopia"
+            )
+            return
+        }
+
         let operationID = UUID()
         beginOperation(
             id: operationID,
@@ -1729,6 +2581,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 matching: scan.processes,
                 activeRunRecord: activeRunRecord
             )
+            if scan.succeeded {
+                self.pruneInactiveKopiaDiagnosticLogs(
+                    preservePIDs: Set(scan.processes.map(\.pid)),
+                    reason: "preflight-\(trigger)"
+                )
+            }
 
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else {
@@ -1790,9 +2648,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             cloud_coverage: nil,
             roots: []
         )
+        cloudCapacityEstimate = CloudCapacityEstimate.unknown()
         state = Config.cloudMaterializationEnabled ? .preparingCloudFiles : .ready
         lastFailure = nil
         lastFailureAt = nil
+        lastFailureKind = nil
+        lastFailureDetail = nil
         lastAbortReason = nil
         kopiaRanAfterMaterialization = false
         appendLog("cloud materialization starting trigger=\(trigger)")
@@ -1840,6 +2701,32 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     )
                 }
                 return
+            }
+
+            if Config.cloudMaterializationEnabled {
+                let capacityEstimate = CloudCapacityEstimator.estimate(
+                    roots: Config.cloudMaterializationRoots,
+                    executionPaths: Config.diskFreeSpaceCheckPaths
+                )
+                DispatchQueue.main.async {
+                    guard self.activeMaterializationID == materializationID else {
+                        return
+                    }
+                    self.cloudCapacityEstimate = capacityEstimate
+                    self.appendLog(self.cloudCapacityEstimateLogMessage(capacityEstimate))
+                    self.writeStatus()
+                }
+
+                guard capacityEstimate.ok else {
+                    DispatchQueue.main.async {
+                        self.finishCloudCapacityFailure(
+                            id: materializationID,
+                            probeResults: probeResults,
+                            estimate: capacityEstimate
+                        )
+                    }
+                    return
+                }
             }
 
             let snapshot: CloudMaterializationSnapshot
@@ -1898,8 +2785,39 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         cloudDownloadBlocked = false
         lastFailureAt = Date()
         lastFailure = message
+        lastFailureKind = "full_disk_access_required"
+        lastFailureDetail = message
         nextRunAt = Date().addingTimeInterval(TimeInterval(Config.cloudMaterializationRetrySeconds))
         appendLog("failure: \(message); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func finishCloudCapacityFailure(
+        id: UUID,
+        probeResults: [ProtectedDataProbeResult],
+        estimate: CloudCapacityEstimate
+    ) {
+        guard activeMaterializationID == id else {
+            clearMaterializationCancellation(id)
+            return
+        }
+
+        clearMaterializationCancellation(id)
+        activeMaterializationID = nil
+        clearOperation()
+        protectedDataProbeResults = probeResults
+        cloudCapacityEstimate = estimate
+        let reason = estimate.reason ?? "insufficient disk capacity for cloud preparation"
+        cloudMaterialization = abortedMaterializationSnapshot(reason: reason)
+        fullDiskAccessBlocked = false
+        cloudDownloadBlocked = false
+        lastFailureAt = Date()
+        lastFailure = "Needs disk space: \(reason)"
+        lastFailureKind = "disk_space_exhausted"
+        lastFailureDetail = reason
+        nextRunAt = Date().addingTimeInterval(TimeInterval(Config.cloudMaterializationRetrySeconds))
+        appendLog("failure: cloud capacity estimate insufficient: \(reason); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
         updateDerivedState()
         writeStatus()
     }
@@ -1929,6 +2847,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             fullDiskAccessBlocked = false
             lastFailureAt = Date()
             lastFailure = "Cloud download blocked: \(reason)"
+            lastFailureKind = "cloud_download_blocked"
+            lastFailureDetail = reason
             if snapshot.aborted {
                 lastAbortReason = reason
             }
@@ -1957,6 +2877,18 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         network = currentNetworkSnapshot()
         guard network.allowed else {
             recordPreflightFailure("Network changed before Kopia start: state=\(network.state) reason='\(network.reason)'")
+            return
+        }
+
+        let startDiskHealth = refreshDiskHealth(
+            requiredBytes: Config.minimumExecutionReserveBytes,
+            thresholdKind: "start"
+        )
+        guard startDiskHealth.ok else {
+            recordDiskSpaceFailure(
+                startDiskHealth,
+                message: "Insufficient local disk space to start Kopia after cloud preparation"
+            )
             return
         }
 
@@ -2142,6 +3074,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.kopiaOutputBuffer = ""
                 self.kopiaSuppressedDatalessReadErrors = 0
                 self.kopiaOtherOutputReadErrors = 0
+                self.observedKopiaFailure = nil
                 self.livenessCheckAt = Date()
                 self.lastKopiaOutputAt = nil
                 self.internalKopiaActivity = InternalKopiaActivitySnapshot.unavailable(
@@ -2158,6 +3091,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.lastStartAt = startedAt
                 self.lastFailure = nil
                 self.lastFailureAt = nil
+                self.lastFailureKind = nil
+                self.lastFailureDetail = nil
                 self.lastAbortReason = nil
                 self.lastNetworkCheckAt = Date()
                 self.kopiaRanAfterMaterialization = ranAfterMaterialization
@@ -2457,7 +3392,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         publishProgress("reading files", forceLog: true)
 
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isUbiquitousItemKey]
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: keys,
@@ -2518,7 +3453,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     datalessPlaceholders += 1
                     datalessPaths.insert(url.path)
                     rememberSample(url.path, in: &datalessSamplePaths)
-                    if isICloudRoot {
+                    if isICloudRoot || values.isUbiquitousItem == true {
                         do {
                             try FileManager.default.startDownloadingUbiquitousItem(at: url)
                         } catch {
@@ -2639,6 +3574,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return message
     }
 
+    private func cloudCapacityEstimateLogMessage(_ estimate: CloudCapacityEstimate) -> String {
+        var message = "cloud capacity estimate confidence=\(estimate.confidence) ok=\(estimate.ok) icloud_known_bytes=\(estimate.icloud_known_bytes) icloud_unknown_count=\(estimate.icloud_unknown_count) icloud_unknown_fallback_bytes=\(estimate.icloud_unknown_fallback_bytes) fileprovider_advisory_known_bytes=\(estimate.fileprovider_advisory_known_bytes) fileprovider_advisory_unknown_count=\(estimate.fileprovider_advisory_unknown_count) execution_reserve_bytes=\(estimate.execution_reserve_bytes) capacity_api=\(estimate.capacity_api)"
+        if !estimate.warnings.isEmpty {
+            message += " warnings=\(estimate.warnings.joined(separator: ","))"
+        }
+        if let reason = estimate.reason {
+            message += " reason=\"\(reason)\""
+        }
+        return message
+    }
+
     private func materializationAbortReason(for id: UUID) -> String? {
         if isMaterializationCancelled(id) {
             return "cloud materialization cancelled"
@@ -2703,7 +3649,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
-    func stopBackup(reason: String = "manual stop") {
+    func stopBackup(
+        reason: String = "manual stop",
+        failureKind: String? = nil,
+        failureDetail: String? = nil
+    ) {
         if let operationID = activeOperationID, activeMaterializationID == nil, activeProcess == nil {
             clearOperation(id: operationID)
             lastAbortReason = reason
@@ -2726,6 +3676,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if let process = activeProcess {
             stopReason = reason
+            stopFailureKind = failureKind
+            stopFailureDetail = failureDetail
             lastAbortReason = reason
             appendLog("abort: \(reason); stopping kopia pid \(process.processIdentifier)")
             process.terminate()
@@ -2746,6 +3698,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if let activePID {
             stopReason = reason
+            stopFailureKind = failureKind
+            stopFailureDetail = failureDetail
             lastAbortReason = reason
             appendLog("abort: \(reason); stopping recovered Kopia pid \(activePID)")
             ProcessInspector.terminate(pids: [activePID])
@@ -2771,6 +3725,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
             }
             self.activePID = nil
+            if let failureKind {
+                let detail = failureDetail ?? reason
+                stopReason = nil
+                stopFailureKind = nil
+                stopFailureDetail = nil
+                recordFailure(reason, kind: failureKind, detail: detail)
+                return
+            }
             updateDerivedState()
             writeStatus()
             return
@@ -2888,6 +3850,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "Needs Permission"
         case .needsFullDiskAccess:
             return "Needs Full Disk Access"
+        case .needsDiskSpace:
+            return "Needs Disk Space"
         case .cloudDownloadBlocked:
             return "Cloud Download Blocked"
         case .cloudPartial:
@@ -2913,7 +3877,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "person.crop.circle.badge.exclamationmark"
         case .paused:
             return "pause.circle"
-        case .needsPermission, .needsFullDiskAccess, .cloudDownloadBlocked, .failed:
+        case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .cloudDownloadBlocked, .failed:
             return "exclamationmark.triangle"
         case .cloudPartial:
             return "icloud.slash"
@@ -2930,6 +3894,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             && activeOperationID == nil
             && externalKopiaPIDs.isEmpty
             && network.allowed
+            && diskHealth.ok
     }
 
     var canStopManual: Bool {
@@ -3038,6 +4003,36 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return parts.joined(separator: ", ")
     }
 
+    var diskHealthText: String? {
+        guard diskHealth.threshold_kind != "unknown" else {
+            return nil
+        }
+        if diskHealth.ok {
+            return nil
+        }
+        return diskHealth.reason ?? "disk space check failed"
+    }
+
+    var cloudCapacityEstimateText: String? {
+        guard cloudCapacityEstimate.checked_at != nil else {
+            return nil
+        }
+
+        let estimate = cloudCapacityEstimate
+        let requiredBytes = estimate.volumes.reduce(Int64(0)) { $0 + $1.required_bytes }
+        let reserveBytes = estimate.volumes.reduce(Int64(0)) { $0 + $1.execution_reserve_bytes }
+        let actionableCloudBytes = estimate.icloud_known_bytes + estimate.icloud_unknown_fallback_bytes
+        if !estimate.ok {
+            return "insufficient, needs \(byteText(requiredBytes)), \(estimate.confidence)"
+        }
+
+        var text = "\(byteText(actionableCloudBytes)) cloud + \(byteText(reserveBytes)) reserve, \(estimate.confidence)"
+        if estimate.fileprovider_advisory_known_bytes > 0 || estimate.fileprovider_advisory_unknown_count > 0 {
+            text += ", FileProvider advisory"
+        }
+        return text
+    }
+
     var cloudMaterializationText: String {
         if activeMaterializationID != nil {
             let phase = cloudMaterialization.current_phase ?? "running"
@@ -3085,6 +4080,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return "\(hours)h \(minutes % 60)m"
     }
 
+    private func byteText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
     private func relativeAgeText(since date: Date, now: Date) -> String {
         let seconds = max(0, Int(now.timeIntervalSince(date)))
         if seconds < 60 {
@@ -3115,9 +4114,36 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             writeStatus()
         }
 
+        if activeProcess == nil
+            && activePID == nil
+            && activeMaterializationID == nil
+            && activeOperationID == nil
+            && (lastFailureKind == "disk_space_exhausted" || diskHealth.threshold_kind == "unknown") {
+            refreshDiskHealth(
+                requiredBytes: Config.minimumExecutionReserveBytes,
+                thresholdKind: "start"
+            )
+            updateDerivedState()
+            writeStatus()
+        }
+
         if let process = activeProcess {
             if !process.isRunning {
                 handleBackupExit(status: process.terminationStatus)
+                return
+            }
+
+            let runtimeDiskHealth = refreshDiskHealth(
+                requiredBytes: Config.criticalRuntimeFreeSpaceBytes,
+                thresholdKind: "runtime"
+            )
+            if !runtimeDiskHealth.ok {
+                let detail = runtimeDiskHealth.reason ?? "disk space below critical runtime threshold"
+                stopBackup(
+                    reason: "disk space below critical threshold: \(detail)",
+                    failureKind: "disk_space_exhausted",
+                    failureDetail: detail
+                )
                 return
             }
 
@@ -3127,6 +4153,20 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         if activeProcess == nil, activePIDOwner == "recovered", activePID != nil {
+            let runtimeDiskHealth = refreshDiskHealth(
+                requiredBytes: Config.criticalRuntimeFreeSpaceBytes,
+                thresholdKind: "runtime"
+            )
+            if !runtimeDiskHealth.ok {
+                let detail = runtimeDiskHealth.reason ?? "disk space below critical runtime threshold"
+                stopBackup(
+                    reason: "disk space below critical threshold: \(detail)",
+                    failureKind: "disk_space_exhausted",
+                    failureDetail: detail
+                )
+                return
+            }
+
             if !network.allowed {
                 stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
                 return
@@ -3239,20 +4279,36 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         if let reason = stopReason {
             lastAbortReason = reason
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            if let stopFailureKind {
+                let detail = stopFailureDetail ?? reason
+                stopReason = nil
+                self.stopFailureKind = nil
+                stopFailureDetail = nil
+                recordFailure(reason, kind: stopFailureKind, detail: detail)
+                return
+            }
             appendLog("kopia backup aborted intentionally: \(reason)")
             stopReason = nil
+            stopFailureDetail = nil
         } else if status == 0 {
             lastSuccessAt = now
             lastSuccessCloudCoverage = cloudMaterialization.cloud_coverage ?? inferredCloudCoverage(cloudMaterialization)
             lastFailureAt = nil
             lastFailure = nil
+            lastFailureKind = nil
+            lastFailureDetail = nil
             lastAbortReason = nil
             fullDiskAccessBlocked = false
             cloudDownloadBlocked = false
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
             appendLog("success: kopia snapshot complete")
         } else {
-            recordFailure("Kopia exited with status \(status)")
+            let classification = observedKopiaFailure ?? KopiaFailureClassifier.generic(status: status)
+            recordFailure(
+                classification.message,
+                kind: classification.kind,
+                detail: classification.detail
+            )
             return
         }
 
@@ -3276,6 +4332,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         } else {
             lastFailureAt = now
             lastFailure = "Recovered Kopia process exited; exit status unavailable"
+            lastFailureKind = "recovered_exit_unknown"
+            lastFailureDetail = "recovered Kopia process exited without a status visible to COPYA"
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
             appendLog("warning: recovered Kopia process exited; status unavailable")
         }
@@ -3284,14 +4342,22 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         writeStatus()
     }
 
-    private func recordFailure(_ message: String) {
+    private func recordFailure(
+        _ message: String,
+        kind: String? = nil,
+        detail: String? = nil
+    ) {
         clearOperation()
         lastFailureAt = Date()
         lastFailure = message
+        lastFailureKind = kind
+        lastFailureDetail = detail
         fullDiskAccessBlocked = false
         cloudDownloadBlocked = false
         nextRunAt = Date().addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
-        appendLog("failure: \(message)")
+        let kindText = kind.map { " kind=\($0)" } ?? ""
+        let detailText = detail.map { " detail=\"\($0)\"" } ?? ""
+        appendLog("failure\(kindText): \(message)\(detailText)")
         updateDerivedState()
         writeStatus()
     }
@@ -3300,6 +4366,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         clearOperation(id: operationID)
         lastFailureAt = Date()
         lastFailure = message
+        lastFailureKind = "preflight_failed"
+        lastFailureDetail = message
         fullDiskAccessBlocked = false
         cloudDownloadBlocked = false
         nextRunAt = Date().addingTimeInterval(TimeInterval(Config.preflightFailureRetrySeconds))
@@ -3407,6 +4475,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
+        if lastFailureKind == "disk_space_exhausted" && (!diskHealth.ok || !cloudCapacityEstimate.ok) {
+            state = .needsDiskSpace
+            return
+        }
+
         switch network.state {
         case "allowed":
             if lastFailureAt != nil {
@@ -3445,13 +4518,23 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             lastSuccessCloudCoverage = status.last_success_cloud_coverage
             lastFailureAt = parseDate(status.last_failure_at)
             lastFailure = status.last_failure
+            lastFailureKind = status.last_failure_kind
+            lastFailureDetail = status.last_failure_detail
             lastAbortReason = status.last_abort_reason
             nextRunAt = parseDate(status.next_run_at)
+            if let statusDiskHealth = status.disk_health {
+                diskHealth = statusDiskHealth
+            }
+            if let statusCloudCapacityEstimate = status.cloud_capacity_estimate {
+                cloudCapacityEstimate = statusCloudCapacityEstimate
+            }
 
             if let lastFailure,
                lastFailure.contains("cloud materialization read failures") {
                 self.lastFailure = nil
                 lastFailureAt = nil
+                lastFailureKind = nil
+                lastFailureDetail = nil
                 lastAbortReason = nil
                 nextRunAt = nil
             }
@@ -3559,7 +4642,13 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
             internal_kopia_log_dirs: Config.internalKopiaLogDirs,
             internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
-            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
+            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes,
+            kopia_activity_heartbeat_interval_seconds: Config.kopiaActivityHeartbeatIntervalSeconds,
+            kopia_internal_log_retention_bytes: Config.kopiaInternalLogRetentionBytes,
+            minimum_execution_reserve_bytes: Config.minimumExecutionReserveBytes,
+            critical_runtime_free_space_bytes: Config.criticalRuntimeFreeSpaceBytes,
+            unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+            disk_free_space_check_paths: Config.diskFreeSpaceCheckPaths
         )
     }
 
@@ -3592,7 +4681,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             kopia_activity: activePID == nil ? nil : internalKopiaActivity,
             kopia_suppressed_dataless_read_errors: activeProcess == nil ? nil : kopiaSuppressedDatalessReadErrors,
             kopia_other_output_read_errors: activeProcess == nil ? nil : kopiaOtherOutputReadErrors,
+            disk_health: diskHealth,
+            cloud_capacity_estimate: cloudCapacityEstimate,
             last_failure_at: dateString(lastFailureAt),
+            last_failure_kind: lastFailureKind,
+            last_failure_detail: lastFailureDetail,
             last_failure: lastFailure,
             last_abort_reason: lastAbortReason,
             protected_data_probe_results: protectedDataProbeResults,
@@ -3698,6 +4791,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if trimmed.contains("Error when processing") {
             kopiaOtherOutputReadErrors += 1
+        }
+        if let classification = KopiaFailureClassifier.classify(line: trimmed),
+           observedKopiaFailure == nil || classification.priority > observedKopiaFailure!.priority {
+            observedKopiaFailure = classification
         }
         appendLog(trimmed)
     }
@@ -3877,7 +4974,10 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             kopia_activity: nil,
             kopia_suppressed_dataless_read_errors: nil,
             kopia_other_output_read_errors: nil,
+            disk_health: DiskHealthSnapshot.unknown(),
             last_failure_at: nil,
+            last_failure_kind: nil,
+            last_failure_detail: nil,
             last_failure: nil,
             last_abort_reason: nil,
             protected_data_probe_results: [],
@@ -3908,7 +5008,13 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
                 internal_kopia_log_dirs: Config.internalKopiaLogDirs,
                 internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
-                internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
+                internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes,
+                kopia_activity_heartbeat_interval_seconds: Config.kopiaActivityHeartbeatIntervalSeconds,
+                kopia_internal_log_retention_bytes: Config.kopiaInternalLogRetentionBytes,
+                minimum_execution_reserve_bytes: Config.minimumExecutionReserveBytes,
+                critical_runtime_free_space_bytes: Config.criticalRuntimeFreeSpaceBytes,
+                unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+                disk_free_space_check_paths: Config.diskFreeSpaceCheckPaths
             )
         )
         printEncoded(status)
@@ -3990,7 +5096,10 @@ func printStatusJSONAndExit() -> Never {
         kopia_activity: nil,
         kopia_suppressed_dataless_read_errors: nil,
         kopia_other_output_read_errors: nil,
+        disk_health: DiskHealthSnapshot.unknown(),
         last_failure_at: nil,
+        last_failure_kind: nil,
+        last_failure_detail: nil,
         last_failure: nil,
         last_abort_reason: nil,
         protected_data_probe_results: [],
@@ -4021,7 +5130,13 @@ func printStatusJSONAndExit() -> Never {
             internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
             internal_kopia_log_dirs: Config.internalKopiaLogDirs,
             internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
-            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
+            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes,
+            kopia_activity_heartbeat_interval_seconds: Config.kopiaActivityHeartbeatIntervalSeconds,
+            kopia_internal_log_retention_bytes: Config.kopiaInternalLogRetentionBytes,
+            minimum_execution_reserve_bytes: Config.minimumExecutionReserveBytes,
+            critical_runtime_free_space_bytes: Config.criticalRuntimeFreeSpaceBytes,
+            unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+            disk_free_space_check_paths: Config.diskFreeSpaceCheckPaths
         )
     )
     printEncodedJSON(status)
@@ -4091,6 +5206,12 @@ struct KopiaBackupMonitorApp: App {
             }
             if let kopiaIssue = monitor.kopiaIssueText {
                 Text(kopiaIssue)
+            }
+            if let diskHealth = monitor.diskHealthText {
+                Text("Disk: \(diskHealth)")
+            }
+            if let cloudEstimate = monitor.cloudCapacityEstimateText {
+                Text("Cloud estimate: \(cloudEstimate)")
             }
             Text("Cloud prep: \(monitor.cloudMaterializationText)")
             if let failure = monitor.lastFailure {

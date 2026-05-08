@@ -95,12 +95,13 @@ and protected app data are intended to be backed up when macOS allows COPYA and
 Kopia to read them.
 
 Cloud-backed roots are configured in `cloud_materialization_roots`. Before
-starting Kopia, COPYA probes protected-data access, attempts best-effort iCloud
-downloads with `brctl download` and macOS ubiquitous-item download requests,
-then classifies files as local-readable, dataless cloud placeholders, or real
-read failures. If that preparation is aborted by network policy, missing SSID
-visibility, permission failure, or timeout, COPYA blocks the snapshot and
-records `Cloud Download Blocked`.
+starting Kopia, COPYA probes protected-data access, estimates cloud placeholder
+capacity, attempts best-effort iCloud downloads with `brctl download` and macOS
+ubiquitous-item download requests, then classifies files as local-readable,
+dataless cloud placeholders, or real read failures. If that preparation is
+aborted by network policy, missing SSID visibility, permission failure, timeout,
+or insufficient local disk capacity, COPYA blocks the snapshot and records the
+specific state.
 
 During cloud preparation, the menu bar keeps the `COPYA` title and shows a
 state icon. The menu and `status.json` report the current cloud root, phase,
@@ -113,6 +114,14 @@ produces low-value `resource deadlock avoided` noise. If placeholders remain,
 COPYA reports `Cloud Partial`, keeps sample paths in `status.json`, and still
 backs up readable local data. Newly downloaded files are included on the next
 backup once macOS clears the dataless flag.
+
+The cloud capacity estimate is intentionally honest instead of magical. COPYA
+sums known iCloud placeholder logical sizes, adds a 256 MiB fallback for each
+iCloud placeholder whose size metadata is missing, and marks estimate confidence
+as `degraded` whenever it used that fallback or had to use filesystem free space
+instead of macOS important-usage capacity. Dropbox and other FileProvider
+placeholder sizes are reported as advisory because COPYA does not have a
+reliable provider-wide "download everything" API for them in v1.
 
 Real per-file read failures are reported separately from dataless placeholders,
 but they do not block Kopia by themselves. COPYA still blocks on network denial,
@@ -206,9 +215,11 @@ The menu bar app shows:
 
 - current state: Ready, Starting Backup, Preparing Cloud Files, Syncing,
   External Backup Detected, Paused, Needs Permission, Needs Full Disk Access,
-  Cloud Download Blocked, Cloud Partial, Failed, or Disabled;
+  Needs Disk Space, Cloud Download Blocked, Cloud Partial, Failed, or
+  Disabled;
 - current SSID and policy reason;
 - cloud preparation status;
+- cloud capacity estimate, confidence, and advisory provider coverage;
 - dataless placeholder and real read-failure counts when cloud coverage is
   partial;
 - next scheduled run;
@@ -222,6 +233,7 @@ The menu bar app shows:
   best-effort activity from COPYA-owned Kopia internal logs;
 - humanized file-read issue summaries from Kopia stdout, without treating those
   counters as backup liveness or backup health;
+- disk-space failures with the checked path, free bytes, and required bytes;
 - last failure or abort reason.
 
 Kopia is intentionally started with `--no-progress`, so its stdout can be quiet
@@ -230,6 +242,25 @@ logs by active child PID and `active-run.json` start time, then shows labels
 such as `upload activity 2s ago via Kopia logs`. This is observability only:
 missing, unreadable, malformed, rotated, or stale Kopia internal logs never
 stop, fail, restart, or duplicate a backup.
+
+COPYA also checks local disk headroom before starting Kopia and while Kopia is
+running. By default, it keeps a 50 GiB execution reserve for Kopia cache, temp,
+index, and logs, then adds any actionable iCloud placeholder estimate before
+hydration starts. It intentionally stops a running COPYA-owned Kopia process if
+the checked volume falls below 20 GiB. The checked paths are configured in
+`group_data/all.py` and cover the Kopia cache, Kopia internal logs, COPYA raw
+log, and `/Users/vera`.
+
+If Kopia exits non-zero, COPYA classifies common fatal causes from Kopia output.
+`no space left on device` is reported as `disk_space_exhausted`;
+`storage_cap_exceeded` is reported as a B2 storage cap failure. A disk-space
+failure means the local Mac ran out of room for Kopia cache/temp/log writes, not
+that the B2 repository is corrupt.
+
+Kopia's internal logs are diagnostic data used for liveness. COPYA prunes
+inactive internal Kopia logs before runs, keeping the newest inactive files up
+to the configured retention budget and preserving logs for every currently
+running `kopia snapshot create` PID.
 
 Menu actions include Start Backup Now, Stop Backup, Check Network, Grant Wi-Fi
 Permission, Open Log, Copy Debug Status, and Quit Monitor.
@@ -291,6 +322,9 @@ Scheduling rules:
 - before Kopia starts, probe protected-data access and prepare configured cloud
   roots;
 - if Full Disk Access is missing, show `Needs Full Disk Access` and retry later;
+- if local disk space is below the configured start threshold, show
+  `Needs Disk Space` and wait for the next normal interval or manual retry
+  after disk space is freed;
 - if cloud materialization is blocked by network, permission, or timeout, show
   `Cloud Download Blocked` and retry later;
 - if Kopia succeeds while dataless placeholders remain, show `Cloud Partial`
@@ -303,6 +337,9 @@ Scheduling rules:
   that interval and schedule the next one;
 - if Wi-Fi becomes denied or degraded while Kopia is running, stop Kopia with
   TERM, then KILL if it does not exit.
+- if local disk space falls below the configured runtime threshold while Kopia
+  is running, stop Kopia with TERM, then KILL if it does not exit, and record a
+  disk-space failure rather than a generic `status=1`.
 
 The app appends human-readable audit logs to:
 

@@ -118,6 +118,70 @@ class CopyaTemplateTest(unittest.TestCase):
         self.assertNotIn("internalKopiaActivity.confidence == \"unavailable\" {\n            stopBackup", source)
         self.assertNotIn("internalKopiaActivity.idle_seconds", source.split("private func stopBackup", 1)[-1])
 
+    def test_disk_health_blocks_and_classifies_local_space_failures(self) -> None:
+        source = render_monitor_source()
+
+        self.assertEqual(data.minimum_execution_reserve_bytes, 53_687_091_200)
+        self.assertEqual(data.critical_runtime_free_space_bytes, 21_474_836_480)
+        self.assertEqual(data.unknown_icloud_placeholder_estimate_bytes, 268_435_456)
+        self.assertEqual(data.kopia_internal_log_retention_bytes, 536_870_912)
+        self.assertEqual(data.kopia_activity_heartbeat_interval_seconds, 300)
+        self.assertIn("minimumExecutionReserveBytes", source)
+        self.assertIn("criticalRuntimeFreeSpaceBytes", source)
+        self.assertIn("diskFreeSpaceCheckPaths", source)
+        self.assertIn("case needsDiskSpace = \"needs_disk_space\"", source)
+        self.assertIn("DiskSpaceProbe.snapshot", source)
+        self.assertIn("Insufficient local disk space to start Kopia", source)
+        self.assertIn("disk space below critical threshold", source)
+        self.assertIn("failureKind: \"disk_space_exhausted\"", source)
+        self.assertIn("last_failure_kind", source)
+        self.assertIn("disk_health", source)
+        self.assertIn("activePIDOwner == \"recovered\"", source)
+        self.assertIn("recordFailure(reason, kind: failureKind, detail: detail)", source)
+
+    def test_cloud_capacity_estimate_uses_fallbacks_without_blocking_unknowns(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("CloudCapacityEstimator", source)
+        self.assertIn("unknownICloudPlaceholderEstimateBytes", source)
+        self.assertIn("icloud_unknown_sizes_fallback", source)
+        self.assertIn("estimate.confidence", source)
+        self.assertIn("fileprovider_advisory_placeholders", source)
+        self.assertIn("volumeAvailableCapacityForImportantUsageKey", source)
+        self.assertIn("filesystem_fallback", source)
+        self.assertIn("minimumExecutionReserveBytes", source)
+        self.assertIn("statSnapshot.size > 0", source)
+        self.assertIn("cloud_capacity_estimate", source)
+        self.assertIn("Cloud estimate:", source)
+        self.assertIn("providerClass(for: url, root: root, values: values)", source)
+        self.assertIn("values?.isUbiquitousItem == true || root.contains(\"/Library/Mobile Documents\")", source)
+        self.assertNotIn("unknown iCloud placeholder sizes block backup", source)
+
+    def test_kopia_exit_classification_covers_known_fatal_errors(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("KopiaFailureClassifier", source)
+        self.assertIn("no space left on device", source)
+        self.assertIn("disk_space_exhausted", source)
+        self.assertIn("storage_cap_exceeded", source)
+        self.assertIn("b2_storage_cap_exceeded", source)
+        self.assertIn("file_read_failure", source)
+        self.assertIn("observedKopiaFailure ?? KopiaFailureClassifier.generic", source)
+        self.assertNotIn('recordFailure("Kopia exited with status \\(status)")', source)
+
+    def test_internal_log_retention_preserves_live_kopia_pids(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("kopiaInternalLogRetentionBytes", source)
+        self.assertIn("KopiaDiagnosticLogPruner.prune", source)
+        self.assertIn("ProcessInspector.matchingKopiaSnapshots().map(\\.pid)", source)
+        self.assertIn("livePIDs.contains(pid)", source)
+        self.assertIn("preserved_live_count", source)
+        self.assertIn("kopia diagnostic log prune", source)
+
+    def test_complete_backup_scope_remains_default(self) -> None:
+        self.assertEqual(data.backup_ignore_patterns, [])
+
     def test_deploy_does_not_kill_external_kopia_snapshot(self) -> None:
         deploy = (ROOT / "deploy.py").read_text()
 
@@ -133,6 +197,20 @@ class CopyaTemplateTest(unittest.TestCase):
         self.assertIn("Refuse monitor restart while COPYA backup is active", deploy)
         self.assertIn("Active matching Kopia backup detected", deploy)
         self.assertIn("allow_deploy_restart_while_backup_running=True", deploy)
+
+    def test_deploy_passes_disk_health_config_to_templates(self) -> None:
+        deploy = (ROOT / "deploy.py").read_text()
+
+        for name in [
+            "kopia_activity_heartbeat_interval_seconds",
+            "kopia_internal_log_retention_bytes",
+            "minimum_execution_reserve_bytes",
+            "critical_runtime_free_space_bytes",
+            "unknown_icloud_placeholder_estimate_bytes",
+            "disk_free_space_check_paths",
+        ]:
+            self.assertIn(f'{name} = data("{name}")', deploy)
+            self.assertIn(f'"{name}": {name}', deploy)
 
 
 if __name__ == "__main__":
