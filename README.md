@@ -71,6 +71,12 @@ The deploy:
   migration;
 - installs and bootstraps `com.vera.kopia.monitor`.
 
+By default, deploy refuses to restart COPYA while a matching
+`kopia snapshot create --no-progress /Users/vera` process is active. Wait for
+the snapshot to finish or stop it explicitly from COPYA before running the
+non-dry deploy. `allow_deploy_restart_while_backup_running` exists as an
+intentional escape hatch in `group_data/all.py`.
+
 The configured macOS user and home directory must already exist. This deploy
 will not create `/Users/vera`.
 
@@ -212,9 +218,18 @@ The menu bar app shows:
   1Password, or launching Kopia;
 - external Kopia PIDs when a matching snapshot process exists without COPYA
   ownership;
-- backup liveness while syncing: elapsed runtime, last monitor heartbeat, last
-  Kopia output age, and summarized dataless read noise;
+- backup liveness while syncing: elapsed runtime, last monitor heartbeat, and
+  best-effort activity from COPYA-owned Kopia internal logs;
+- humanized file-read issue summaries from Kopia stdout, without treating those
+  counters as backup liveness or backup health;
 - last failure or abort reason.
+
+Kopia is intentionally started with `--no-progress`, so its stdout can be quiet
+for long stretches during a healthy backup. COPYA correlates Kopia's internal
+logs by active child PID and `active-run.json` start time, then shows labels
+such as `upload activity 2s ago via Kopia logs`. This is observability only:
+missing, unreadable, malformed, rotated, or stale Kopia internal logs never
+stop, fail, restart, or duplicate a backup.
 
 Menu actions include Start Backup Now, Stop Backup, Check Network, Grant Wi-Fi
 Permission, Open Log, Copy Debug Status, and Quit Monitor.

@@ -75,6 +75,49 @@ class CopyaTemplateTest(unittest.TestCase):
         self.assertIn("forceTerminateCapturedExternalPIDsAfterGracePeriod", source)
         self.assertIn("COPYA_RUN_ID", source)
 
+    def test_internal_kopia_activity_probe_is_scoped_to_active_pid(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("internalKopiaActivityProbeEnabled", source)
+        self.assertIn("internalKopiaLogDirs", source)
+        self.assertIn("InternalKopiaActivityProbe.scan", source)
+        self.assertIn('let pidNeedle = "-\\(activePID)-snapshot-create."', source)
+        self.assertIn("record.child_pid == activePID", source)
+        self.assertIn("activeRunID.map({ record.run_id == $0 }) ?? true", source)
+        self.assertIn("used_fallback_run_start", source)
+        self.assertIn("internal log activity unavailable", source)
+
+    def test_internal_kopia_activity_parser_covers_known_log_events(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn('"PutBlob"', source)
+        self.assertIn('"upload activity"', source)
+        self.assertIn('"write-content-new"', source)
+        self.assertIn('"content write activity"', source)
+        self.assertIn('"add-to-pack"', source)
+        self.assertIn('"packing content"', source)
+        self.assertIn('"snapshotted directory"', source)
+        self.assertIn("parseJSONObject", source)
+        self.assertIn("try? JSONSerialization.jsonObject", source)
+
+    def test_menu_uses_activity_liveness_instead_of_raw_error_counters(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("kopiaActivityMenuText", source)
+        self.assertIn("via Kopia logs", source)
+        self.assertIn("stdout output", source)
+        self.assertIn("no recent activity observed; process still running", source)
+        self.assertIn("file read issues logged from Kopia stdout", source)
+        self.assertNotIn("other errors:", source)
+
+    def test_status_exposes_observability_without_control_coupling(self) -> None:
+        source = render_monitor_source()
+
+        self.assertIn("var kopia_activity: InternalKopiaActivitySnapshot?", source)
+        self.assertIn("kopia_activity: activePID == nil ? nil : internalKopiaActivity", source)
+        self.assertNotIn("internalKopiaActivity.confidence == \"unavailable\" {\n            stopBackup", source)
+        self.assertNotIn("internalKopiaActivity.idle_seconds", source.split("private func stopBackup", 1)[-1])
+
     def test_deploy_does_not_kill_external_kopia_snapshot(self) -> None:
         deploy = (ROOT / "deploy.py").read_text()
 
@@ -82,6 +125,14 @@ class CopyaTemplateTest(unittest.TestCase):
             'pkill -TERM -f "^kopia snapshot create --no-progress',
             deploy,
         )
+
+    def test_deploy_refuses_restart_when_backup_is_active_by_default(self) -> None:
+        deploy = (ROOT / "deploy.py").read_text()
+
+        self.assertFalse(data.allow_deploy_restart_while_backup_running)
+        self.assertIn("Refuse monitor restart while COPYA backup is active", deploy)
+        self.assertIn("Active matching Kopia backup detected", deploy)
+        self.assertIn("allow_deploy_restart_while_backup_running=True", deploy)
 
 
 if __name__ == "__main__":

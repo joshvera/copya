@@ -43,6 +43,14 @@ log_file = "/Users/vera/Library/Logs/kopia-backup.log"
 raw_kopia_log_file = "/Users/vera/.local/kopia-backup/kopia-raw.log"
 status_file = "/Users/vera/.local/kopia-backup/status.json"
 active_run_file = "/Users/vera/.local/kopia-backup/active-run.json"
+internal_kopia_activity_probe_enabled = True
+internal_kopia_log_dirs = [
+    "/Users/vera/Library/Logs/kopia/cli-logs",
+    "/Users/vera/Library/Logs/kopia/content-logs",
+]
+internal_kopia_log_mtime_tolerance_seconds = 10
+internal_kopia_log_tail_bytes = 131072
+allow_deploy_restart_while_backup_running = False
 onepassword_read_timeout_seconds = 60
 
 app_name = "COPYA"

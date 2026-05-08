@@ -37,6 +37,11 @@ log_file = data("log_file")
 raw_kopia_log_file = data("raw_kopia_log_file")
 status_file = data("status_file")
 active_run_file = data("active_run_file")
+internal_kopia_activity_probe_enabled = bool_data("internal_kopia_activity_probe_enabled")
+internal_kopia_log_dirs = data("internal_kopia_log_dirs")
+internal_kopia_log_mtime_tolerance_seconds = data("internal_kopia_log_mtime_tolerance_seconds")
+internal_kopia_log_tail_bytes = data("internal_kopia_log_tail_bytes")
+allow_deploy_restart_while_backup_running = bool_data("allow_deploy_restart_while_backup_running")
 app_name = data("app_name")
 app_install_dir = data("app_install_dir")
 app_executable_name = data("app_executable_name")
@@ -109,6 +114,10 @@ template_context = {
     "run_interval_seconds": run_interval_seconds,
     "runner_dir": runner_dir,
     "status_file": status_file,
+    "internal_kopia_activity_probe_enabled": internal_kopia_activity_probe_enabled,
+    "internal_kopia_log_dirs": internal_kopia_log_dirs,
+    "internal_kopia_log_mtime_tolerance_seconds": internal_kopia_log_mtime_tolerance_seconds,
+    "internal_kopia_log_tail_bytes": internal_kopia_log_tail_bytes,
     "config_user": user,
 }
 
@@ -149,6 +158,23 @@ brew.packages(
     name="Install Kopia and 1Password CLI",
     packages=["kopia", onepassword_cli_package],
 )
+
+if not allow_deploy_restart_while_backup_running:
+    server.shell(
+        name="Refuse monitor restart while COPYA backup is active",
+        commands=[
+            (
+                f'if /usr/bin/pgrep -flx "(.*/)?kopia snapshot create --no-progress {backup_source}" '
+                ">/dev/null; then "
+                'echo "Active matching Kopia backup detected; refusing to redeploy/restart the monitor. '
+                'Wait for the backup to finish, stop it explicitly, or set '
+                'allow_deploy_restart_while_backup_running=True for an intentional override." >&2; '
+                "exit 1; "
+                "fi"
+            ),
+        ],
+        _sudo=use_sudo,
+    )
 
 files.directory(
     name="Create Kopia monitor state directory",

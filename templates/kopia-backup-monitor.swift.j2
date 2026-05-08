@@ -36,6 +36,14 @@ enum Config {
     static let rawKopiaLogFile = "{{ raw_kopia_log_file }}"
     static let statusFile = "{{ status_file }}"
     static let activeRunFile = "{{ active_run_file }}"
+    static let internalKopiaActivityProbeEnabled = {{ "true" if internal_kopia_activity_probe_enabled else "false" }}
+    static let internalKopiaLogDirs: [String] = [
+{% for path in internal_kopia_log_dirs %}
+        "{{ path }}",
+{% endfor %}
+    ]
+    static let internalKopiaLogMtimeToleranceSeconds = {{ internal_kopia_log_mtime_tolerance_seconds }}
+    static let internalKopiaLogTailBytes = {{ internal_kopia_log_tail_bytes }}
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
     static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
@@ -96,6 +104,10 @@ struct ConfigSummary: Codable {
     var raw_kopia_log_file: String
     var status_file: String
     var active_run_file: String
+    var internal_kopia_activity_probe_enabled: Bool
+    var internal_kopia_log_dirs: [String]
+    var internal_kopia_log_mtime_tolerance_seconds: Int
+    var internal_kopia_log_tail_bytes: Int
 }
 
 extension ConfigSummary {
@@ -121,6 +133,10 @@ extension ConfigSummary {
         case raw_kopia_log_file
         case status_file
         case active_run_file
+        case internal_kopia_activity_probe_enabled
+        case internal_kopia_log_dirs
+        case internal_kopia_log_mtime_tolerance_seconds
+        case internal_kopia_log_tail_bytes
     }
 
     init(from decoder: Decoder) throws {
@@ -146,6 +162,10 @@ extension ConfigSummary {
         raw_kopia_log_file = try container.decodeIfPresent(String.self, forKey: .raw_kopia_log_file) ?? Config.rawKopiaLogFile
         status_file = try container.decodeIfPresent(String.self, forKey: .status_file) ?? Config.statusFile
         active_run_file = try container.decodeIfPresent(String.self, forKey: .active_run_file) ?? Config.activeRunFile
+        internal_kopia_activity_probe_enabled = try container.decodeIfPresent(Bool.self, forKey: .internal_kopia_activity_probe_enabled) ?? Config.internalKopiaActivityProbeEnabled
+        internal_kopia_log_dirs = try container.decodeIfPresent([String].self, forKey: .internal_kopia_log_dirs) ?? Config.internalKopiaLogDirs
+        internal_kopia_log_mtime_tolerance_seconds = try container.decodeIfPresent(Int.self, forKey: .internal_kopia_log_mtime_tolerance_seconds) ?? Config.internalKopiaLogMtimeToleranceSeconds
+        internal_kopia_log_tail_bytes = try container.decodeIfPresent(Int.self, forKey: .internal_kopia_log_tail_bytes) ?? Config.internalKopiaLogTailBytes
     }
 }
 
@@ -315,6 +335,7 @@ struct StatusSnapshot: Codable {
     var last_liveness_check_at: String?
     var last_kopia_output_at: String?
     var kopia_output_idle_seconds: Int?
+    var kopia_activity: InternalKopiaActivitySnapshot?
     var kopia_suppressed_dataless_read_errors: Int?
     var kopia_other_output_read_errors: Int?
     var last_failure_at: String?
@@ -350,6 +371,7 @@ struct StatusSnapshot: Codable {
         case last_liveness_check_at
         case last_kopia_output_at
         case kopia_output_idle_seconds
+        case kopia_activity
         case kopia_suppressed_dataless_read_errors
         case kopia_other_output_read_errors
         case last_failure_at
@@ -388,6 +410,7 @@ struct StatusSnapshot: Codable {
         try encodeOptional(last_liveness_check_at, into: &container, forKey: .last_liveness_check_at)
         try encodeOptional(last_kopia_output_at, into: &container, forKey: .last_kopia_output_at)
         try encodeOptional(kopia_output_idle_seconds, into: &container, forKey: .kopia_output_idle_seconds)
+        try encodeOptional(kopia_activity, into: &container, forKey: .kopia_activity)
         try encodeOptional(kopia_suppressed_dataless_read_errors, into: &container, forKey: .kopia_suppressed_dataless_read_errors)
         try encodeOptional(kopia_other_output_read_errors, into: &container, forKey: .kopia_other_output_read_errors)
         try encodeOptional(last_failure_at, into: &container, forKey: .last_failure_at)
@@ -679,6 +702,472 @@ struct ActiveRunRecord: Codable {
     var updated_at: String
 }
 
+struct InternalKopiaActivitySnapshot: Codable {
+    var probe_enabled: Bool
+    var confidence: String
+    var summary: String?
+    var latest_activity_at: String?
+    var source_type: String?
+    var source_path: String?
+    var idle_seconds: Int?
+    var stdout_idle_seconds: Int?
+    var active_pid: Int32?
+    var active_run_id: String?
+    var run_started_at: String?
+    var used_fallback_run_start: Bool
+    var unavailable_reason: String?
+    var recent_upload_bytes: Int64?
+    var content_activity_count: Int
+    var scanned_log_count: Int
+
+    static func inactive() -> InternalKopiaActivitySnapshot {
+        InternalKopiaActivitySnapshot(
+            probe_enabled: Config.internalKopiaActivityProbeEnabled,
+            confidence: "none",
+            summary: nil,
+            latest_activity_at: nil,
+            source_type: nil,
+            source_path: nil,
+            idle_seconds: nil,
+            stdout_idle_seconds: nil,
+            active_pid: nil,
+            active_run_id: nil,
+            run_started_at: nil,
+            used_fallback_run_start: false,
+            unavailable_reason: "no active COPYA-owned Kopia run",
+            recent_upload_bytes: nil,
+            content_activity_count: 0,
+            scanned_log_count: 0
+        )
+    }
+
+    static func unavailable(
+        enabled: Bool = Config.internalKopiaActivityProbeEnabled,
+        reason: String,
+        activePID: Int32?,
+        activeRunID: String?,
+        runStartedAt: Date?,
+        usedFallbackRunStart: Bool,
+        stdoutAt: Date?,
+        now: Date = Date(),
+        scannedLogCount: Int = 0
+    ) -> InternalKopiaActivitySnapshot {
+        InternalKopiaActivitySnapshot(
+            probe_enabled: enabled,
+            confidence: enabled ? "unavailable" : "disabled",
+            summary: nil,
+            latest_activity_at: nil,
+            source_type: nil,
+            source_path: nil,
+            idle_seconds: nil,
+            stdout_idle_seconds: stdoutAt.map { max(0, Int(now.timeIntervalSince($0))) },
+            active_pid: activePID,
+            active_run_id: activeRunID,
+            run_started_at: runStartedAt.map { DateFormatters.iso.string(from: $0) },
+            used_fallback_run_start: usedFallbackRunStart,
+            unavailable_reason: reason,
+            recent_upload_bytes: nil,
+            content_activity_count: 0,
+            scanned_log_count: scannedLogCount
+        )
+    }
+}
+
+private struct InternalKopiaActivityEvent {
+    var date: Date
+    var summary: String
+    var sourceType: String
+    var sourcePath: String
+    var uploadBytes: Int64?
+}
+
+enum InternalKopiaActivityProbe {
+    static func scan(
+        activePID: Int32?,
+        activeRunID: String?,
+        activeRunRecord: ActiveRunRecord?,
+        fallbackRunStartedAt: Date?,
+        stdoutAt: Date?,
+        now: Date = Date()
+    ) -> InternalKopiaActivitySnapshot {
+        guard Config.internalKopiaActivityProbeEnabled else {
+            return InternalKopiaActivitySnapshot.unavailable(
+                enabled: false,
+                reason: "internal Kopia activity probe disabled",
+                activePID: activePID,
+                activeRunID: activeRunID,
+                runStartedAt: fallbackRunStartedAt,
+                usedFallbackRunStart: fallbackRunStartedAt != nil,
+                stdoutAt: stdoutAt,
+                now: now
+            )
+        }
+
+        guard let activePID else {
+            return .inactive()
+        }
+
+        let runContext = resolvedRunContext(
+            activePID: activePID,
+            activeRunID: activeRunID,
+            activeRunRecord: activeRunRecord,
+            fallbackRunStartedAt: fallbackRunStartedAt
+        )
+        guard let runStartedAt = runContext.startedAt else {
+            return InternalKopiaActivitySnapshot.unavailable(
+                reason: "missing active run start timestamp",
+                activePID: activePID,
+                activeRunID: runContext.runID,
+                runStartedAt: nil,
+                usedFallbackRunStart: false,
+                stdoutAt: stdoutAt,
+                now: now
+            )
+        }
+
+        let fileManager = FileManager.default
+        let existingDirs = Config.internalKopiaLogDirs.filter { path in
+            var isDirectory = ObjCBool(false)
+            return fileManager.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        guard !existingDirs.isEmpty else {
+            return InternalKopiaActivitySnapshot.unavailable(
+                enabled: false,
+                reason: "configured Kopia log directories do not exist",
+                activePID: activePID,
+                activeRunID: runContext.runID,
+                runStartedAt: runStartedAt,
+                usedFallbackRunStart: runContext.usedFallback,
+                stdoutAt: stdoutAt,
+                now: now
+            )
+        }
+
+        let tolerance = TimeInterval(Config.internalKopiaLogMtimeToleranceSeconds)
+        let minEligibleDate = runStartedAt.addingTimeInterval(-tolerance)
+        let files = eligibleLogFiles(
+            in: existingDirs,
+            activePID: activePID,
+            minEligibleDate: minEligibleDate
+        )
+
+        guard !files.isEmpty else {
+            return InternalKopiaActivitySnapshot.unavailable(
+                reason: "no per-PID Kopia logs found for active run",
+                activePID: activePID,
+                activeRunID: runContext.runID,
+                runStartedAt: runStartedAt,
+                usedFallbackRunStart: runContext.usedFallback,
+                stdoutAt: stdoutAt,
+                now: now
+            )
+        }
+
+        var latestEvent: InternalKopiaActivityEvent?
+        var latestMTime: (date: Date, sourceType: String, sourcePath: String)?
+        var recentUploadBytes: Int64 = 0
+        var uploadEventCount = 0
+        var contentActivityCount = 0
+
+        for file in files {
+            if latestMTime == nil || file.modifiedAt > latestMTime!.date {
+                latestMTime = (file.modifiedAt, file.sourceType, file.url.path)
+            }
+            let parsed = parseTail(
+                url: file.url,
+                sourceType: file.sourceType,
+                minEligibleDate: minEligibleDate,
+                fallbackDate: file.modifiedAt
+            )
+            contentActivityCount += parsed.contentActivityCount
+            recentUploadBytes += parsed.uploadBytes
+            uploadEventCount += parsed.uploadEventCount
+            if let event = parsed.latestEvent,
+               latestEvent == nil || event.date > latestEvent!.date {
+                latestEvent = event
+            }
+        }
+
+        let selectedEvent: InternalKopiaActivityEvent
+        let confidence: String
+        if let latestEvent {
+            selectedEvent = latestEvent
+            confidence = "internal-log"
+        } else if let latestMTime {
+            selectedEvent = InternalKopiaActivityEvent(
+                date: latestMTime.date,
+                summary: "Kopia log updated",
+                sourceType: latestMTime.sourceType,
+                sourcePath: latestMTime.sourcePath,
+                uploadBytes: nil
+            )
+            confidence = "internal-log-mtime"
+        } else {
+            return InternalKopiaActivitySnapshot.unavailable(
+                reason: "per-PID Kopia logs were unreadable",
+                activePID: activePID,
+                activeRunID: runContext.runID,
+                runStartedAt: runStartedAt,
+                usedFallbackRunStart: runContext.usedFallback,
+                stdoutAt: stdoutAt,
+                now: now,
+                scannedLogCount: files.count
+            )
+        }
+
+        return InternalKopiaActivitySnapshot(
+            probe_enabled: true,
+            confidence: confidence,
+            summary: selectedEvent.summary,
+            latest_activity_at: DateFormatters.iso.string(from: selectedEvent.date),
+            source_type: selectedEvent.sourceType,
+            source_path: selectedEvent.sourcePath,
+            idle_seconds: max(0, Int(now.timeIntervalSince(selectedEvent.date))),
+            stdout_idle_seconds: stdoutAt.map { max(0, Int(now.timeIntervalSince($0))) },
+            active_pid: activePID,
+            active_run_id: runContext.runID,
+            run_started_at: DateFormatters.iso.string(from: runStartedAt),
+            used_fallback_run_start: runContext.usedFallback,
+            unavailable_reason: nil,
+            recent_upload_bytes: uploadEventCount == 0 ? selectedEvent.uploadBytes : recentUploadBytes,
+            content_activity_count: contentActivityCount,
+            scanned_log_count: files.count
+        )
+    }
+
+    private static func resolvedRunContext(
+        activePID: Int32,
+        activeRunID: String?,
+        activeRunRecord: ActiveRunRecord?,
+        fallbackRunStartedAt: Date?
+    ) -> (runID: String?, startedAt: Date?, usedFallback: Bool) {
+        if let record = activeRunRecord,
+           record.child_pid == activePID,
+           activeRunID.map({ record.run_id == $0 }) ?? true,
+           let startedAt = parseISODate(record.started_at) {
+            return (record.run_id, startedAt, false)
+        }
+
+        if let fallbackRunStartedAt {
+            return (activeRunID ?? activeRunRecord?.run_id, fallbackRunStartedAt, true)
+        }
+
+        return (activeRunID ?? activeRunRecord?.run_id, nil, false)
+    }
+
+    private static func eligibleLogFiles(
+        in dirs: [String],
+        activePID: Int32,
+        minEligibleDate: Date
+    ) -> [(url: URL, sourceType: String, modifiedAt: Date)] {
+        let fileManager = FileManager.default
+        let pidNeedle = "-\(activePID)-snapshot-create."
+        var files: [(URL, String, Date)] = []
+
+        for dir in dirs {
+            let dirURL = URL(fileURLWithPath: dir)
+            guard let children = try? fileManager.contentsOfDirectory(
+                at: dirURL,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            let sourceType = dirURL.lastPathComponent == "content-logs" ? "content-log" : "cli-log"
+            for url in children {
+                let name = url.lastPathComponent
+                guard name.hasPrefix("kopia-"),
+                      name.contains(pidNeedle),
+                      name.hasSuffix(".log") else {
+                    continue
+                }
+                let modifiedAt = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate) ?? Date.distantPast
+                guard modifiedAt >= minEligibleDate else {
+                    continue
+                }
+                files.append((url, sourceType, modifiedAt))
+            }
+        }
+
+        return files.sorted { left, right in
+            left.2 > right.2
+        }
+    }
+
+    private static func parseTail(
+        url: URL,
+        sourceType: String,
+        minEligibleDate: Date,
+        fallbackDate: Date
+    ) -> (latestEvent: InternalKopiaActivityEvent?, uploadBytes: Int64, uploadEventCount: Int, contentActivityCount: Int) {
+        guard let text = readTail(url: url) else {
+            return (nil, 0, 0, 0)
+        }
+
+        var latestEvent: InternalKopiaActivityEvent?
+        var uploadBytes: Int64 = 0
+        var uploadEventCount = 0
+        var contentActivityCount = 0
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let event = parseEvent(
+                String(line),
+                sourceType: sourceType,
+                sourcePath: url.path,
+                fallbackDate: fallbackDate
+            ) else {
+                continue
+            }
+            guard event.date >= minEligibleDate else {
+                continue
+            }
+            if event.summary == "upload activity", let bytes = event.uploadBytes {
+                uploadBytes += bytes
+                uploadEventCount += 1
+            }
+            if event.summary == "content write activity"
+                || event.summary == "packing content"
+                || event.summary == "upload activity" {
+                contentActivityCount += 1
+            }
+            if latestEvent == nil || event.date > latestEvent!.date {
+                latestEvent = event
+            }
+        }
+
+        return (latestEvent, uploadBytes, uploadEventCount, contentActivityCount)
+    }
+
+    private static func readTail(url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let tailBytes = UInt64(max(4096, Config.internalKopiaLogTailBytes))
+        let startOffset = endOffset > tailBytes ? endOffset - tailBytes : 0
+        try? handle.seek(toOffset: startOffset)
+        let data = handle.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func parseEvent(
+        _ line: String,
+        sourceType: String,
+        sourcePath: String,
+        fallbackDate: Date
+    ) -> InternalKopiaActivityEvent? {
+        let parsedObject = parseJSONObject(from: line)
+        let message = (parsedObject?["m"] as? String)
+            ?? (parsedObject?["message"] as? String)
+            ?? (line.contains("PutBlob") ? "PutBlob" : nil)
+        let eventDate = parseEventDate(line: line, object: parsedObject) ?? fallbackDate
+
+        if message == "PutBlob" || line.contains("PutBlob") {
+            if let object = parsedObject,
+               let error = object["error"],
+               !(error is NSNull) {
+                return nil
+            }
+            let length = numericInt64(parsedObject?["length"])
+            return InternalKopiaActivityEvent(
+                date: eventDate,
+                summary: "upload activity",
+                sourceType: sourceType,
+                sourcePath: sourcePath,
+                uploadBytes: length
+            )
+        }
+
+        if message == "write-content-new" {
+            return InternalKopiaActivityEvent(
+                date: eventDate,
+                summary: "content write activity",
+                sourceType: sourceType,
+                sourcePath: sourcePath,
+                uploadBytes: nil
+            )
+        }
+
+        if message == "add-to-pack" {
+            return InternalKopiaActivityEvent(
+                date: eventDate,
+                summary: "packing content",
+                sourceType: sourceType,
+                sourcePath: sourcePath,
+                uploadBytes: nil
+            )
+        }
+
+        if line.contains("snapshotted directory") {
+            return InternalKopiaActivityEvent(
+                date: eventDate,
+                summary: "snapshotted directory",
+                sourceType: sourceType,
+                sourcePath: sourcePath,
+                uploadBytes: nil
+            )
+        }
+
+        return nil
+    }
+
+    private static func parseJSONObject(from line: String) -> [String: Any]? {
+        guard let jsonStart = line.firstIndex(of: "{") else {
+            return nil
+        }
+        let jsonText = String(line[jsonStart...])
+        guard let data = jsonText.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private static func parseEventDate(line: String, object: [String: Any]?) -> Date? {
+        if let value = object?["ts"] as? String,
+           let date = parseISODate(value) {
+            return date
+        }
+
+        guard let firstToken = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first else {
+            return nil
+        }
+        return parseISODate(String(firstToken))
+    }
+
+    private static func parseISODate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func numericInt64(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 {
+            return value
+        }
+        if let value = value as? Int {
+            return Int64(value)
+        }
+        if let value = value as? NSNumber {
+            return value.int64Value
+        }
+        if let value = value as? String {
+            return Int64(value)
+        }
+        return nil
+    }
+}
+
 struct KopiaProcessInfo: Codable, Equatable {
     var pid: Int32
     var parent_pid: Int32
@@ -873,6 +1362,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var externalKopiaPIDs: [Int32] = []
     @Published var livenessCheckAt = Date()
     @Published var lastKopiaOutputAt: Date?
+    @Published var internalKopiaActivity = InternalKopiaActivitySnapshot.inactive()
     @Published var protectedDataProbeResults: [ProtectedDataProbeResult] = []
     @Published var cloudMaterialization = CloudMaterializationSnapshot.empty()
     @Published var kopiaRanAfterMaterialization = false
@@ -883,6 +1373,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private let materializationQueue = DispatchQueue(label: "kopia.monitor.cloud-materialization", qos: .utility)
     private let processQueue = DispatchQueue(label: "kopia.monitor.process", qos: .utility)
     private let startQueue = DispatchQueue(label: "kopia.monitor.start", qos: .utility)
+    private let kopiaActivityQueue = DispatchQueue(label: "kopia.monitor.kopia-activity", qos: .utility)
     private let materializationControlLock = NSLock()
     private var timer: Timer?
     private var started = false
@@ -890,6 +1381,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var activePipe: Pipe?
     private var activeOperationID: UUID?
     private var processReconcileInFlight = false
+    private var kopiaActivityProbeInFlight = false
     private var startupReady = false
     private var kopiaOutputBuffer = ""
     private var kopiaSuppressedDatalessReadErrors = 0
@@ -903,6 +1395,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var pathIsConstrained = false
     private var fullDiskAccessBlocked = false
     private var cloudDownloadBlocked = false
+    private var lastKopiaActivityHeartbeatLogAt: Date?
+    private var lastKopiaActivityHeartbeatSummary: String?
 
     private override init() {
         super.init()
@@ -953,6 +1447,72 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     func checkNetworkNow() {
         refreshNetwork(reason: "manual-check", shouldEvaluateSchedule: false)
         reconcileLiveKopiaProcesses(reason: "manual-check", shouldEvaluateSchedule: true)
+        refreshInternalKopiaActivity(reason: "manual-check")
+    }
+
+    private func refreshInternalKopiaActivity(reason: String) {
+        guard activePID != nil else {
+            internalKopiaActivity = .inactive()
+            return
+        }
+        guard !kopiaActivityProbeInFlight else {
+            return
+        }
+
+        kopiaActivityProbeInFlight = true
+        let activePID = activePID
+        let activeRunID = activeRunID
+        let activeRunRecord = readActiveRunRecord()
+        let fallbackRunStartedAt = lastStartAt
+        let stdoutAt = lastKopiaOutputAt
+
+        kopiaActivityQueue.async { [weak self] in
+            let snapshot = InternalKopiaActivityProbe.scan(
+                activePID: activePID,
+                activeRunID: activeRunID,
+                activeRunRecord: activeRunRecord,
+                fallbackRunStartedAt: fallbackRunStartedAt,
+                stdoutAt: stdoutAt
+            )
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+                self.kopiaActivityProbeInFlight = false
+                guard self.activePID == activePID else {
+                    return
+                }
+                self.internalKopiaActivity = snapshot
+                self.appendKopiaActivityHeartbeatIfNeeded(snapshot, reason: reason)
+                self.writeStatus()
+            }
+        }
+    }
+
+    private func appendKopiaActivityHeartbeatIfNeeded(
+        _ snapshot: InternalKopiaActivitySnapshot,
+        reason: String
+    ) {
+        guard activePID != nil else {
+            return
+        }
+        let now = Date()
+        let summary = snapshot.summary ?? snapshot.unavailable_reason ?? snapshot.confidence
+        let shouldLogStateChange = summary != lastKopiaActivityHeartbeatSummary
+        let shouldLogInterval = lastKopiaActivityHeartbeatLogAt == nil
+            || now.timeIntervalSince(lastKopiaActivityHeartbeatLogAt!) >= 180
+
+        guard shouldLogStateChange || shouldLogInterval else {
+            return
+        }
+
+        lastKopiaActivityHeartbeatLogAt = now
+        lastKopiaActivityHeartbeatSummary = summary
+        let idleText = snapshot.idle_seconds.map { " idle_seconds=\($0)" } ?? ""
+        let sourceText = snapshot.source_type.map { " source=\($0)" } ?? ""
+        let pathText = snapshot.source_path.map { " path=\"\($0)\"" } ?? ""
+        appendLog("kopia activity heartbeat reason=\(reason) confidence=\(snapshot.confidence) summary=\"\(summary)\"\(idleText)\(sourceText)\(pathText)")
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -1584,6 +2144,16 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.kopiaOtherOutputReadErrors = 0
                 self.livenessCheckAt = Date()
                 self.lastKopiaOutputAt = nil
+                self.internalKopiaActivity = InternalKopiaActivitySnapshot.unavailable(
+                    reason: "waiting for per-PID Kopia logs",
+                    activePID: process.processIdentifier,
+                    activeRunID: runID,
+                    runStartedAt: startedAt,
+                    usedFallbackRunStart: false,
+                    stdoutAt: nil
+                )
+                self.lastKopiaActivityHeartbeatLogAt = nil
+                self.lastKopiaActivityHeartbeatSummary = nil
                 self.stopReason = nil
                 self.lastStartAt = startedAt
                 self.lastFailure = nil
@@ -2419,19 +2989,37 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         let elapsed = durationText(since: lastStartAt, now: livenessCheckAt)
         let heartbeatAge = relativeAgeText(since: livenessCheckAt, now: Date())
-        let outputText: String
-        if activeProcess == nil, activePIDOwner == "recovered" {
-            outputText = "output unavailable after monitor recovery"
-        } else if let lastKopiaOutputAt {
-            outputText = "output \(relativeAgeText(since: lastKopiaOutputAt, now: livenessCheckAt)) ago"
-        } else {
-            outputText = "output quiet"
-        }
         let owner = activePIDOwner ?? "unknown"
-        return "\(owner), running \(elapsed), checked \(heartbeatAge) ago, \(outputText)"
+        return "\(owner), running \(elapsed), checked \(heartbeatAge) ago, \(kopiaActivityMenuText)"
     }
 
-    var kopiaNoiseText: String? {
+    var kopiaActivityMenuText: String {
+        if internalKopiaActivity.confidence == "internal-log"
+            || internalKopiaActivity.confidence == "internal-log-mtime" {
+            let summary = internalKopiaActivity.summary ?? "Kopia activity"
+            if let activityAt = parseDate(internalKopiaActivity.latest_activity_at) {
+                return "\(summary) \(relativeAgeText(since: activityAt, now: livenessCheckAt)) ago via Kopia logs"
+            }
+            return "\(summary) via Kopia logs"
+        }
+
+        if let lastKopiaOutputAt {
+            return "stdout output \(relativeAgeText(since: lastKopiaOutputAt, now: livenessCheckAt)) ago"
+        }
+
+        if activeProcess == nil, activePIDOwner == "recovered" {
+            return "internal log activity unavailable after monitor recovery"
+        }
+
+        if internalKopiaActivity.confidence == "unavailable"
+            || internalKopiaActivity.confidence == "disabled" {
+            return "internal log activity unavailable; process still running"
+        }
+
+        return "no recent activity observed; process still running"
+    }
+
+    var kopiaIssueText: String? {
         guard activeProcess != nil else {
             return nil
         }
@@ -2440,7 +3028,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return nil
         }
 
-        return "dataless read noise: \(kopiaSuppressedDatalessReadErrors), other errors: \(kopiaOtherOutputReadErrors)"
+        var parts: [String] = []
+        if kopiaSuppressedDatalessReadErrors > 0 {
+            parts.append("\(kopiaSuppressedDatalessReadErrors) dataless placeholder reads logged from Kopia stdout")
+        }
+        if kopiaOtherOutputReadErrors > 0 {
+            parts.append("\(kopiaOtherOutputReadErrors) file read issues logged from Kopia stdout")
+        }
+        return parts.joined(separator: ", ")
     }
 
     var cloudMaterializationText: String {
@@ -2542,6 +3137,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         if activeProcess != nil || activePID != nil || activeMaterializationID != nil || activeOperationID != nil || !externalKopiaPIDs.isEmpty {
+            refreshInternalKopiaActivity(reason: "tick")
             writeStatus()
         }
     }
@@ -2634,6 +3230,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         activePID = nil
         activeRunID = nil
         activePIDOwner = nil
+        internalKopiaActivity = .inactive()
+        lastKopiaActivityHeartbeatLogAt = nil
+        lastKopiaActivityHeartbeatSummary = nil
         removeActiveRunRecord()
 
         let now = Date()
@@ -2956,7 +3555,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             log_file: Config.logFile,
             raw_kopia_log_file: Config.rawKopiaLogFile,
             status_file: Config.statusFile,
-            active_run_file: Config.activeRunFile
+            active_run_file: Config.activeRunFile,
+            internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
+            internal_kopia_log_dirs: Config.internalKopiaLogDirs,
+            internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
+            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
         )
     }
 
@@ -2986,6 +3589,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             last_liveness_check_at: activePID == nil && activeMaterializationID == nil && activeOperationID == nil && externalKopiaPIDs.isEmpty ? nil : dateString(livenessCheckAt),
             last_kopia_output_at: dateString(lastKopiaOutputAt),
             kopia_output_idle_seconds: activeProcess == nil || lastKopiaOutputAt == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastKopiaOutputAt!)),
+            kopia_activity: activePID == nil ? nil : internalKopiaActivity,
             kopia_suppressed_dataless_read_errors: activeProcess == nil ? nil : kopiaSuppressedDatalessReadErrors,
             kopia_other_output_read_errors: activeProcess == nil ? nil : kopiaOtherOutputReadErrors,
             last_failure_at: dateString(lastFailureAt),
@@ -3270,6 +3874,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             last_liveness_check_at: nil,
             last_kopia_output_at: nil,
             kopia_output_idle_seconds: nil,
+            kopia_activity: nil,
             kopia_suppressed_dataless_read_errors: nil,
             kopia_other_output_read_errors: nil,
             last_failure_at: nil,
@@ -3299,7 +3904,11 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 log_file: Config.logFile,
                 raw_kopia_log_file: Config.rawKopiaLogFile,
                 status_file: Config.statusFile,
-                active_run_file: Config.activeRunFile
+                active_run_file: Config.activeRunFile,
+                internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
+                internal_kopia_log_dirs: Config.internalKopiaLogDirs,
+                internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
+                internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
             )
         )
         printEncoded(status)
@@ -3378,6 +3987,7 @@ func printStatusJSONAndExit() -> Never {
         last_liveness_check_at: nil,
         last_kopia_output_at: nil,
         kopia_output_idle_seconds: nil,
+        kopia_activity: nil,
         kopia_suppressed_dataless_read_errors: nil,
         kopia_other_output_read_errors: nil,
         last_failure_at: nil,
@@ -3407,7 +4017,11 @@ func printStatusJSONAndExit() -> Never {
             log_file: Config.logFile,
             raw_kopia_log_file: Config.rawKopiaLogFile,
             status_file: Config.statusFile,
-            active_run_file: Config.activeRunFile
+            active_run_file: Config.activeRunFile,
+            internal_kopia_activity_probe_enabled: Config.internalKopiaActivityProbeEnabled,
+            internal_kopia_log_dirs: Config.internalKopiaLogDirs,
+            internal_kopia_log_mtime_tolerance_seconds: Config.internalKopiaLogMtimeToleranceSeconds,
+            internal_kopia_log_tail_bytes: Config.internalKopiaLogTailBytes
         )
     )
     printEncodedJSON(status)
@@ -3475,8 +4089,8 @@ struct KopiaBackupMonitorApp: App {
             if let externalPIDs = monitor.externalKopiaPIDsText {
                 Text("External Kopia PIDs: \(externalPIDs)")
             }
-            if let kopiaNoise = monitor.kopiaNoiseText {
-                Text(kopiaNoise)
+            if let kopiaIssue = monitor.kopiaIssueText {
+                Text(kopiaIssue)
             }
             Text("Cloud prep: \(monitor.cloudMaterializationText)")
             if let failure = monitor.lastFailure {
