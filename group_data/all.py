@@ -42,6 +42,8 @@ runner_dir = "/Users/vera/.local/kopia-backup"
 log_file = "/Users/vera/Library/Logs/kopia-backup.log"
 raw_kopia_log_file = "/Users/vera/.local/kopia-backup/kopia-raw.log"
 status_file = "/Users/vera/.local/kopia-backup/status.json"
+active_run_file = "/Users/vera/.local/kopia-backup/active-run.json"
+onepassword_read_timeout_seconds = 60
 
 app_name = "COPYA"
 app_install_dir = "/Applications"

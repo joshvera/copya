@@ -198,9 +198,9 @@ photo originals until Photos has downloaded them locally.
 
 The menu bar app shows:
 
-- current state: Ready, Preparing Cloud Files, Syncing, Paused, Needs
-  Permission, Needs Full Disk Access, Cloud Download Blocked, Cloud Partial,
-  Failed, or Disabled;
+- current state: Ready, Starting Backup, Preparing Cloud Files, Syncing,
+  External Backup Detected, Paused, Needs Permission, Needs Full Disk Access,
+  Cloud Download Blocked, Cloud Partial, Failed, or Disabled;
 - current SSID and policy reason;
 - cloud preparation status;
 - dataless placeholder and real read-failure counts when cloud coverage is
@@ -208,6 +208,10 @@ The menu bar app shows:
 - next scheduled run;
 - last successful backup;
 - active Kopia PID when syncing;
+- active operation detail while COPYA is checking existing processes, reading
+  1Password, or launching Kopia;
+- external Kopia PIDs when a matching snapshot process exists without COPYA
+  ownership;
 - backup liveness while syncing: elapsed runtime, last monitor heartbeat, last
   Kopia output age, and summarized dataless read noise;
 - last failure or abort reason.
@@ -221,6 +225,25 @@ The app writes status JSON here:
 /Users/vera/.local/kopia-backup/status.json
 ```
 
+While COPYA owns a running Kopia process, it also writes:
+
+```bash
+/Users/vera/.local/kopia-backup/active-run.json
+```
+
+That file records the COPYA run ID, app PID, child PID, command, source, and
+start time. On relaunch, COPYA uses it to recover ownership of a still-running
+backup instead of starting a duplicate. If a matching `kopia snapshot create
+--no-progress /Users/vera` process exists without a valid ownership file, COPYA
+shows `External Backup Detected`, blocks new starts, and lets `Stop Backup`
+terminate those external PIDs explicitly.
+
+COPYA scans for matching Kopia processes both before preflight and again
+immediately before launch. If process inspection fails, backup start fails
+closed rather than guessing that no Kopia process exists. Deploy cleanup no
+longer kills bare Kopia snapshot processes; external backups are surfaced in
+the app instead.
+
 Useful debug commands:
 
 ```bash
@@ -228,6 +251,7 @@ Useful debug commands:
 "/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
 launchctl print gui/$(id -u)/com.vera.kopia.monitor
 pgrep -fl 'kopia-backup-monitor|kopia snapshot create'
+cat /Users/vera/.local/kopia-backup/active-run.json
 tail -f /Users/vera/Library/Logs/kopia-backup.log
 ```
 
@@ -240,6 +264,10 @@ kopia snapshot create --no-progress /Users/vera
 ```
 
 Only one Kopia child process may run at a time.
+
+Potentially slow operations are kept off the menu bar thread: process scans,
+protected-data probes, cloud preparation, `op read`, and Kopia process launch.
+The menu should remain clickable while COPYA is starting or preparing a backup.
 
 Scheduling rules:
 

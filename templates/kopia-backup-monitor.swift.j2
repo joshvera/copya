@@ -35,10 +35,12 @@ enum Config {
     static let logFile = "{{ log_file }}"
     static let rawKopiaLogFile = "{{ raw_kopia_log_file }}"
     static let statusFile = "{{ status_file }}"
+    static let activeRunFile = "{{ active_run_file }}"
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
     static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
     static let preflightFailureRetrySeconds = {{ preflight_failure_retry_seconds }}
+    static let onePasswordReadTimeoutSeconds = {{ onepassword_read_timeout_seconds }}
     static let denySSIDs = Set<String>([
 {% for ssid in deny_ssids %}
         "{{ ssid }}",
@@ -93,6 +95,7 @@ struct ConfigSummary: Codable {
     var log_file: String
     var raw_kopia_log_file: String
     var status_file: String
+    var active_run_file: String
 }
 
 extension ConfigSummary {
@@ -117,6 +120,7 @@ extension ConfigSummary {
         case log_file
         case raw_kopia_log_file
         case status_file
+        case active_run_file
     }
 
     init(from decoder: Decoder) throws {
@@ -141,6 +145,7 @@ extension ConfigSummary {
         log_file = try container.decodeIfPresent(String.self, forKey: .log_file) ?? Config.logFile
         raw_kopia_log_file = try container.decodeIfPresent(String.self, forKey: .raw_kopia_log_file) ?? Config.rawKopiaLogFile
         status_file = try container.decodeIfPresent(String.self, forKey: .status_file) ?? Config.statusFile
+        active_run_file = try container.decodeIfPresent(String.self, forKey: .active_run_file) ?? Config.activeRunFile
     }
 }
 
@@ -295,7 +300,14 @@ struct StatusSnapshot: Codable {
     var network_is_expensive: Bool
     var network_is_constrained: Bool
     var next_run_at: String?
+    var active_operation: String?
+    var active_operation_started_at: String?
+    var active_operation_detail: String?
+    var operation_elapsed_seconds: Int?
     var active_pid: Int32?
+    var active_run_id: String?
+    var active_pid_owner: String?
+    var external_kopia_pids: [Int32]?
     var last_start_at: String?
     var last_success_at: String?
     var last_success_cloud_coverage: String?
@@ -323,7 +335,14 @@ struct StatusSnapshot: Codable {
         case network_is_expensive
         case network_is_constrained
         case next_run_at
+        case active_operation
+        case active_operation_started_at
+        case active_operation_detail
+        case operation_elapsed_seconds
         case active_pid
+        case active_run_id
+        case active_pid_owner
+        case external_kopia_pids
         case last_start_at
         case last_success_at
         case last_success_cloud_coverage
@@ -354,7 +373,14 @@ struct StatusSnapshot: Codable {
         try container.encode(config_summary, forKey: .config_summary)
         try encodeOptional(network_ssid, into: &container, forKey: .network_ssid)
         try encodeOptional(next_run_at, into: &container, forKey: .next_run_at)
+        try encodeOptional(active_operation, into: &container, forKey: .active_operation)
+        try encodeOptional(active_operation_started_at, into: &container, forKey: .active_operation_started_at)
+        try encodeOptional(active_operation_detail, into: &container, forKey: .active_operation_detail)
+        try encodeOptional(operation_elapsed_seconds, into: &container, forKey: .operation_elapsed_seconds)
         try encodeOptional(active_pid, into: &container, forKey: .active_pid)
+        try encodeOptional(active_run_id, into: &container, forKey: .active_run_id)
+        try encodeOptional(active_pid_owner, into: &container, forKey: .active_pid_owner)
+        try encodeOptional(external_kopia_pids, into: &container, forKey: .external_kopia_pids)
         try encodeOptional(last_start_at, into: &container, forKey: .last_start_at)
         try encodeOptional(last_success_at, into: &container, forKey: .last_success_at)
         try encodeOptional(last_success_cloud_coverage, into: &container, forKey: .last_success_cloud_coverage)
@@ -387,8 +413,10 @@ struct StatusSnapshot: Codable {
 
 enum BackupState: String {
     case ready
+    case startingBackup = "starting_backup"
     case preparingCloudFiles = "preparing_cloud_files"
     case syncing
+    case externalBackupDetected = "external_backup_detected"
     case paused
     case needsPermission = "needs_permission"
     case needsFullDiskAccess = "needs_full_disk_access"
@@ -640,6 +668,169 @@ enum CommandRunner {
     }
 }
 
+struct ActiveRunRecord: Codable {
+    var run_id: String
+    var app_pid: Int32
+    var child_pid: Int32?
+    var executable: String
+    var command: [String]
+    var backup_source: String
+    var started_at: String
+    var updated_at: String
+}
+
+struct KopiaProcessInfo: Codable, Equatable {
+    var pid: Int32
+    var parent_pid: Int32
+    var command: String
+}
+
+struct KopiaProcessScan {
+    var succeeded: Bool
+    var processes: [KopiaProcessInfo]
+    var error: String?
+}
+
+struct ReconciledKopiaState {
+    var owned: KopiaProcessInfo?
+    var starting: ActiveRunRecord?
+    var external: [KopiaProcessInfo]
+    var staleActiveRunRecord: Bool
+}
+
+enum ProcessInspector {
+    static func scanKopiaSnapshots() -> KopiaProcessScan {
+        do {
+            let result = try CommandRunner.run(
+                "/usr/bin/pgrep",
+                arguments: [
+                    "-flx",
+                    "(.*/)?kopia snapshot create --no-progress \(Config.backupSource)",
+                ],
+                timeoutSeconds: 10
+            )
+            guard result.status == 0 || result.status == 1 else {
+                return KopiaProcessScan(
+                    succeeded: false,
+                    processes: [],
+                    error: sanitizedScanError(result.stderr, fallback: "pgrep exited \(result.status)")
+                )
+            }
+
+            let processes = result.stdout
+                .split(separator: "\n")
+                .compactMap(parsePgrepLine)
+                .filter { isMatchingKopiaSnapshot(command: $0.command) }
+            return KopiaProcessScan(succeeded: true, processes: processes, error: nil)
+        } catch {
+            return KopiaProcessScan(
+                succeeded: false,
+                processes: [],
+                error: error.localizedDescription
+            )
+        }
+    }
+
+    static func matchingKopiaSnapshots() -> [KopiaProcessInfo] {
+        scanKopiaSnapshots().processes
+    }
+
+    static func isMatchingKopiaSnapshot(command: String) -> Bool {
+        let bareCommand = "kopia snapshot create --no-progress \(Config.backupSource)"
+        let pathSuffix = "/kopia snapshot create --no-progress \(Config.backupSource)"
+        return command == bareCommand || command.hasSuffix(pathSuffix)
+    }
+
+    static func terminate(pids: [Int32]) {
+        for pid in pids {
+            kill(pid, SIGTERM)
+        }
+    }
+
+    static func forceTerminate(pids: [Int32]) {
+        for pid in pids {
+            kill(pid, SIGKILL)
+        }
+    }
+
+    private static func parsePgrepLine(_ line: Substring) -> KopiaProcessInfo? {
+        let fields = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        guard fields.count == 2,
+              let pid = Int32(String(fields[0])) else {
+            return nil
+        }
+        return KopiaProcessInfo(
+            pid: pid,
+            parent_pid: 0,
+            command: String(fields[1])
+        )
+    }
+
+    private static func sanitizedScanError(_ stderr: String, fallback: String) -> String {
+        stderr
+            .split(separator: "\n")
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? fallback
+    }
+}
+
+enum ProcessReconciler {
+    static func reconcile(
+        matching processes: [KopiaProcessInfo],
+        activeRunRecord: ActiveRunRecord?
+    ) -> ReconciledKopiaState {
+        guard let activeRunRecord else {
+            return ReconciledKopiaState(
+                owned: nil,
+                starting: nil,
+                external: processes,
+                staleActiveRunRecord: false
+            )
+        }
+
+        guard activeRunRecord.backup_source == Config.backupSource,
+              activeRunRecord.command == ["snapshot", "create", "--no-progress", Config.backupSource] else {
+            return ReconciledKopiaState(
+                owned: nil,
+                starting: nil,
+                external: processes,
+                staleActiveRunRecord: true
+            )
+        }
+
+        if let childPID = activeRunRecord.child_pid,
+           let owned = processes.first(where: { $0.pid == childPID }) {
+            return ReconciledKopiaState(
+                owned: owned,
+                starting: nil,
+                external: processes.filter { $0.pid != owned.pid },
+                staleActiveRunRecord: false
+            )
+        }
+
+        if activeRunRecord.child_pid == nil,
+           let updatedAt = DateFormatters.iso.date(from: activeRunRecord.updated_at),
+           Date().timeIntervalSince(updatedAt) < 300 {
+            return ReconciledKopiaState(
+                owned: nil,
+                starting: activeRunRecord,
+                external: processes,
+                staleActiveRunRecord: false
+            )
+        }
+
+        return ReconciledKopiaState(
+            owned: nil,
+            starting: nil,
+            external: processes,
+            staleActiveRunRecord: true
+        )
+    }
+}
+
 enum FileFlags {
     private static let sfDataless = UInt32(0x40000000)
 
@@ -674,6 +865,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var lastFailure: String?
     @Published var lastAbortReason: String?
     @Published var activePID: Int32?
+    @Published var activeOperation: String?
+    @Published var activeOperationStartedAt: Date?
+    @Published var activeOperationDetail: String?
+    @Published var activeRunID: String?
+    @Published var activePIDOwner: String?
+    @Published var externalKopiaPIDs: [Int32] = []
     @Published var livenessCheckAt = Date()
     @Published var lastKopiaOutputAt: Date?
     @Published var protectedDataProbeResults: [ProtectedDataProbeResult] = []
@@ -684,10 +881,16 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private let pathMonitor = NWPathMonitor()
     private let pathQueue = DispatchQueue(label: "kopia.monitor.network-path")
     private let materializationQueue = DispatchQueue(label: "kopia.monitor.cloud-materialization", qos: .utility)
+    private let processQueue = DispatchQueue(label: "kopia.monitor.process", qos: .utility)
+    private let startQueue = DispatchQueue(label: "kopia.monitor.start", qos: .utility)
+    private let materializationControlLock = NSLock()
     private var timer: Timer?
     private var started = false
     private var activeProcess: Process?
     private var activePipe: Pipe?
+    private var activeOperationID: UUID?
+    private var processReconcileInFlight = false
+    private var startupReady = false
     private var kopiaOutputBuffer = ""
     private var kopiaSuppressedDatalessReadErrors = 0
     private var kopiaOtherOutputReadErrors = 0
@@ -695,6 +898,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var stopReason: String?
     private var lastNetworkCheckAt = Date.distantPast
     private var lastMaterializationNetworkCheckAt = Date.distantPast
+    private var cancelledMaterializationIDs = Set<UUID>()
     private var pathIsExpensive = false
     private var pathIsConstrained = false
     private var fullDiskAccessBlocked = false
@@ -723,7 +927,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
         pathMonitor.start(queue: pathQueue)
 
-        refreshNetwork(reason: "startup", shouldEvaluateSchedule: true)
+        refreshNetwork(reason: "startup", shouldEvaluateSchedule: false)
+        seedLastSuccessFromLogIfNeededThenReconcile()
         timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -746,7 +951,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     func checkNetworkNow() {
-        refreshNetwork(reason: "manual-check", shouldEvaluateSchedule: true)
+        refreshNetwork(reason: "manual-check", shouldEvaluateSchedule: false)
+        reconcileLiveKopiaProcesses(reason: "manual-check", shouldEvaluateSchedule: true)
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -761,13 +967,177 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         refreshNetwork(reason: "location-error", shouldEvaluateSchedule: true)
     }
 
+    private func beginOperation(id: UUID, name: String, detail: String) {
+        activeOperationID = id
+        activeOperation = name
+        activeOperationStartedAt = Date()
+        activeOperationDetail = detail
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func clearOperation(id: UUID? = nil) {
+        if let id, activeOperationID != id {
+            return
+        }
+        activeOperationID = nil
+        activeOperation = nil
+        activeOperationStartedAt = nil
+        activeOperationDetail = nil
+    }
+
+    private func markMaterializationCancelled(_ id: UUID) {
+        materializationControlLock.lock()
+        cancelledMaterializationIDs.insert(id)
+        materializationControlLock.unlock()
+    }
+
+    private func clearMaterializationCancellation(_ id: UUID) {
+        materializationControlLock.lock()
+        cancelledMaterializationIDs.remove(id)
+        materializationControlLock.unlock()
+    }
+
+    private func isMaterializationCancelled(_ id: UUID) -> Bool {
+        materializationControlLock.lock()
+        let cancelled = cancelledMaterializationIDs.contains(id)
+        materializationControlLock.unlock()
+        return cancelled
+    }
+
+    private func applyReconciledKopiaState(
+        _ reconciled: ReconciledKopiaState,
+        reason: String
+    ) -> Bool {
+        if reconciled.staleActiveRunRecord {
+            appendLog("removing stale active-run record reason=\(reason)")
+            removeActiveRunRecord()
+        }
+
+        if let owned = reconciled.owned {
+            activePID = owned.pid
+            activePIDOwner = activeProcess == nil ? "recovered" : "current"
+            activeRunID = readActiveRunRecord()?.run_id
+            externalKopiaPIDs = reconciled.external.map(\.pid).sorted()
+            lastStartAt = lastStartAt ?? parseDate(readActiveRunRecord()?.started_at) ?? Date()
+            appendLog("recovered COPYA-owned Kopia process pid=\(owned.pid) reason=\(reason)")
+            return true
+        }
+
+        if let starting = reconciled.starting {
+            activePID = nil
+            activePIDOwner = "starting"
+            activeRunID = starting.run_id
+            activeOperation = "starting_backup"
+            activeOperationStartedAt = parseDate(starting.started_at) ?? Date()
+            activeOperationDetail = "another COPYA instance is starting Kopia"
+            externalKopiaPIDs = reconciled.external.map(\.pid).sorted()
+            appendLog("COPYA active-run start in progress run_id=\(starting.run_id) reason=\(reason)")
+            return true
+        }
+
+        if !reconciled.external.isEmpty {
+            activePID = nil
+            activePIDOwner = nil
+            activeRunID = nil
+            activeOperation = nil
+            activeOperationStartedAt = nil
+            activeOperationDetail = nil
+            externalKopiaPIDs = reconciled.external.map(\.pid).sorted()
+            appendLog("external Kopia snapshot process detected pids=\(externalKopiaPIDs.map { String($0) }.joined(separator: ",")) reason=\(reason)")
+            return true
+        }
+
+        if !externalKopiaPIDs.isEmpty {
+            appendLog("external Kopia snapshot processes cleared reason=\(reason)")
+        }
+        if activePIDOwner == "starting" {
+            activePIDOwner = nil
+            activeRunID = nil
+            activeOperation = nil
+            activeOperationStartedAt = nil
+            activeOperationDetail = nil
+        }
+        externalKopiaPIDs = []
+        return false
+    }
+
+    private func reconcileLiveKopiaProcesses(
+        reason: String,
+        shouldEvaluateSchedule: Bool,
+        markStartupReady: Bool = false
+    ) {
+        guard !processReconcileInFlight else {
+            return
+        }
+        processReconcileInFlight = true
+        let recoveredPID = activePIDOwner == "recovered" ? activePID : nil
+
+        processQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let scan = ProcessInspector.scanKopiaSnapshots()
+            let activeRunRecord = self.readActiveRunRecord()
+            let reconciled = ProcessReconciler.reconcile(
+                matching: scan.processes,
+                activeRunRecord: activeRunRecord
+            )
+
+            DispatchQueue.main.async {
+                self.processReconcileInFlight = false
+                if markStartupReady {
+                    self.startupReady = true
+                }
+                guard scan.succeeded else {
+                    self.appendLog("process scan failed during \(reason): \(scan.error ?? "unknown error")")
+                    self.updateDerivedState()
+                    self.writeStatus()
+                    return
+                }
+
+                if let recoveredPID,
+                   !scan.processes.contains(where: { $0.pid == recoveredPID }) {
+                    self.handleRecoveredBackupExit()
+                    return
+                }
+
+                let blocked = self.applyReconciledKopiaState(reconciled, reason: reason)
+                self.updateDerivedState()
+                self.writeStatus()
+                if shouldEvaluateSchedule && !blocked {
+                    self.evaluateSchedule(becameAllowed: false, reason: reason)
+                }
+            }
+        }
+    }
+
     func startBackup(trigger: String) {
         guard activeProcess == nil else {
             appendLog("start ignored: backup already running pid=\(activePID ?? 0)")
             return
         }
+        guard activePID == nil else {
+            appendLog("start ignored: backup already running pid=\(activePID ?? 0) owner=\(activePIDOwner ?? "unknown")")
+            return
+        }
+        guard activeRunID == nil else {
+            appendLog("start ignored: active run already present run_id=\(activeRunID ?? "unknown") owner=\(activePIDOwner ?? "unknown")")
+            return
+        }
         guard activeMaterializationID == nil else {
             appendLog("start ignored: cloud materialization already running")
+            return
+        }
+        guard activeOperationID == nil else {
+            appendLog("start ignored: operation already running \(activeOperation ?? "unknown")")
+            return
+        }
+        guard externalKopiaPIDs.isEmpty else {
+            appendLog("start blocked: external Kopia process detected pids=\(externalKopiaPIDs.map { String($0) }.joined(separator: ","))")
+            updateDerivedState()
+            writeStatus()
             return
         }
 
@@ -779,22 +1149,65 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
-        guard let opPath = CommandRunner.findExecutable("op") else {
-            recordPreflightFailure("1Password CLI 'op' is not installed or not on PATH")
-            return
-        }
+        let operationID = UUID()
+        beginOperation(
+            id: operationID,
+            name: "starting_backup",
+            detail: "checking for existing Kopia processes"
+        )
 
-        guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
-            recordPreflightFailure("Kopia is not installed or not on PATH")
-            return
-        }
+        startQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
 
-        startPreflightAndMaterialization(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath)
+            let opPath = CommandRunner.findExecutable("op")
+            let kopiaPath = CommandRunner.findExecutable("kopia")
+            let scan = ProcessInspector.scanKopiaSnapshots()
+            let activeRunRecord = self.readActiveRunRecord()
+            let reconciled = ProcessReconciler.reconcile(
+                matching: scan.processes,
+                activeRunRecord: activeRunRecord
+            )
+
+            DispatchQueue.main.async {
+                guard self.activeOperationID == operationID else {
+                    return
+                }
+
+                guard scan.succeeded else {
+                    self.recordPreflightFailure("Unable to inspect running Kopia processes: \(scan.error ?? "unknown error")", operationID: operationID)
+                    return
+                }
+
+                if self.applyReconciledKopiaState(reconciled, reason: "start-\(trigger)") {
+                    self.clearOperation(id: operationID)
+                    self.updateDerivedState()
+                    self.writeStatus()
+                    return
+                }
+
+                guard let opPath else {
+                    self.recordPreflightFailure("1Password CLI 'op' is not installed or not on PATH", operationID: operationID)
+                    return
+                }
+
+                guard let kopiaPath else {
+                    self.recordPreflightFailure("Kopia is not installed or not on PATH", operationID: operationID)
+                    return
+                }
+
+                self.activeOperationDetail = "preparing protected files"
+                self.startPreflightAndMaterialization(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath)
+            }
+        }
     }
 
     private func startPreflightAndMaterialization(trigger: String, opPath: String, kopiaPath: String) {
         let materializationID = UUID()
         activeMaterializationID = materializationID
+        clearMaterializationCancellation(materializationID)
+        activeOperationDetail = "probing protected data"
         lastMaterializationNetworkCheckAt = Date()
         fullDiskAccessBlocked = false
         cloudDownloadBlocked = false
@@ -912,10 +1325,13 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         message: String
     ) {
         guard activeMaterializationID == id else {
+            clearMaterializationCancellation(id)
             return
         }
 
+        clearMaterializationCancellation(id)
         activeMaterializationID = nil
+        clearOperation()
         protectedDataProbeResults = probeResults
         cloudMaterialization = abortedMaterializationSnapshot(reason: message)
         fullDiskAccessBlocked = true
@@ -937,14 +1353,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         kopiaPath: String
     ) {
         guard activeMaterializationID == id else {
+            clearMaterializationCancellation(id)
             return
         }
 
+        clearMaterializationCancellation(id)
         activeMaterializationID = nil
         protectedDataProbeResults = probeResults
         cloudMaterialization = snapshot
 
         guard snapshot.completed && !snapshot.aborted else {
+            clearOperation()
             let reason = snapshot.reason ?? "cloud materialization did not complete"
             cloudDownloadBlocked = true
             fullDiskAccessBlocked = false
@@ -966,10 +1385,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             appendLog("warning: cloud materialization partial dataless_placeholders=\(datalessPlaceholders) read_failures=\(readFailures); starting Kopia anyway")
         }
         appendLog("cloud materialization complete files_read=\(snapshot.total_files_read) dataless_placeholders=\(datalessPlaceholders) read_failures=\(readFailures) roots=\(snapshot.roots.count)")
-        launchKopia(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath, ranAfterMaterialization: Config.cloudMaterializationEnabled)
+        startKopiaLaunch(trigger: trigger, opPath: opPath, kopiaPath: kopiaPath, ranAfterMaterialization: Config.cloudMaterializationEnabled)
     }
 
-    private func launchKopia(
+    private func startKopiaLaunch(
         trigger: String,
         opPath: String,
         kopiaPath: String,
@@ -981,91 +1400,209 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
-        let password: String
-        do {
-            let result = try CommandRunner.run(
-                opPath,
-                arguments: ["read", Config.kopiaPasswordRef],
-                environment: childEnvironment()
-            )
-            guard result.status == 0 else {
-                let detail = sanitizedCommandError(result.stderr)
-                if detail.isEmpty {
-                    recordPreflightFailure("Unable to read Kopia password from 1Password reference")
-                } else {
-                    recordPreflightFailure("Unable to read Kopia password from 1Password reference: \(detail)")
-                    appendLog("op read failed: \(detail)")
+        let operationID = activeOperationID ?? UUID()
+        if activeOperationID == nil {
+            beginOperation(id: operationID, name: "starting_backup", detail: "reading 1Password password")
+        } else {
+            activeOperation = "starting_backup"
+            activeOperationDetail = "reading 1Password password"
+            updateDerivedState()
+            writeStatus()
+        }
+
+        startQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let password: String
+            do {
+                let result = try CommandRunner.run(
+                    opPath,
+                    arguments: ["read", Config.kopiaPasswordRef],
+                    environment: self.childEnvironment(),
+                    timeoutSeconds: Config.onePasswordReadTimeoutSeconds
+                )
+                if result.timedOut {
+                    DispatchQueue.main.async {
+                        guard self.activeOperationID == operationID else {
+                            return
+                        }
+                        self.recordPreflightFailure("Timed out reading Kopia password from 1Password", operationID: operationID)
+                    }
+                    return
+                }
+                guard result.status == 0 else {
+                    let detail = self.sanitizedCommandError(result.stderr)
+                    DispatchQueue.main.async {
+                        guard self.activeOperationID == operationID else {
+                            return
+                        }
+                        if detail.isEmpty {
+                            self.recordPreflightFailure("Unable to read Kopia password from 1Password reference", operationID: operationID)
+                        } else {
+                            self.recordPreflightFailure("Unable to read Kopia password from 1Password reference: \(detail)", operationID: operationID)
+                            self.appendLog("op read failed: \(detail)")
+                        }
+                    }
+                    return
+                }
+                password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure("Unable to run 1Password CLI: \(error.localizedDescription)", operationID: operationID)
                 }
                 return
             }
-            password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            recordPreflightFailure("Unable to run 1Password CLI: \(error.localizedDescription)")
-            return
-        }
 
-        guard !password.isEmpty else {
-            recordPreflightFailure("1Password returned an empty Kopia password")
-            return
-        }
-
-        let process = Process()
-        let pipe = Pipe()
-        var environment = childEnvironment()
-        environment["KOPIA_PASSWORD"] = password
-
-        process.executableURL = URL(fileURLWithPath: kopiaPath)
-        process.arguments = ["snapshot", "create", "--no-progress", Config.backupSource]
-        process.environment = environment
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
+            guard !password.isEmpty else {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure("1Password returned an empty Kopia password", operationID: operationID)
+                }
                 return
             }
-            self?.handleKopiaOutputData(data)
-        }
 
-        process.terminationHandler = { [weak self] finished in
+            let launchScan = ProcessInspector.scanKopiaSnapshots()
+            let launchReconciled = ProcessReconciler.reconcile(
+                matching: launchScan.processes,
+                activeRunRecord: self.readActiveRunRecord()
+            )
+
+            guard launchScan.succeeded else {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure("Unable to inspect running Kopia processes before launch: \(launchScan.error ?? "unknown error")", operationID: operationID)
+                }
+                return
+            }
+
+            if launchReconciled.owned != nil
+                || launchReconciled.starting != nil
+                || !launchReconciled.external.isEmpty {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    _ = self.applyReconciledKopiaState(launchReconciled, reason: "pre-launch-\(trigger)")
+                    self.clearOperation(id: operationID)
+                    self.updateDerivedState()
+                    self.writeStatus()
+                }
+                return
+            }
+
+            let runID = UUID().uuidString
+            let startedAt = Date()
+            let process = Process()
+            let pipe = Pipe()
+            var environment = self.childEnvironment()
+            environment["KOPIA_PASSWORD"] = password
+            environment["COPYA_RUN_ID"] = runID
+
+            process.executableURL = URL(fileURLWithPath: kopiaPath)
+            process.arguments = ["snapshot", "create", "--no-progress", Config.backupSource]
+            process.environment = environment
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            let initialRecord = ActiveRunRecord(
+                run_id: runID,
+                app_pid: ProcessInfo.processInfo.processIdentifier,
+                child_pid: nil,
+                executable: kopiaPath,
+                command: process.arguments ?? [],
+                backup_source: Config.backupSource,
+                started_at: DateFormatters.iso.string(from: startedAt),
+                updated_at: DateFormatters.iso.string(from: Date())
+            )
+            guard self.createActiveRunRecord(initialRecord) else {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure("Another COPYA run is already starting or active", operationID: operationID)
+                }
+                return
+            }
+
+            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    return
+                }
+                self?.handleKopiaOutputData(data)
+            }
+
+            process.terminationHandler = { [weak self] finished in
+                DispatchQueue.main.async {
+                    self?.handleBackupExit(status: finished.terminationStatus)
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                self.removeActiveRunRecord()
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure("Unable to start Kopia: \(error.localizedDescription)", operationID: operationID)
+                }
+                return
+            }
+
+            var activeRecord = initialRecord
+            activeRecord.child_pid = process.processIdentifier
+            activeRecord.updated_at = DateFormatters.iso.string(from: Date())
+            self.writeActiveRunRecord(activeRecord)
+
             DispatchQueue.main.async {
-                self?.handleBackupExit(status: finished.terminationStatus)
+                guard self.activeOperationID == operationID else {
+                    self.removeActiveRunRecord()
+                    process.terminate()
+                    return
+                }
+
+                self.activeProcess = process
+                self.activePipe = pipe
+                self.activePID = process.processIdentifier
+                self.activeRunID = runID
+                self.activePIDOwner = "current"
+                self.externalKopiaPIDs = []
+                self.kopiaOutputBuffer = ""
+                self.kopiaSuppressedDatalessReadErrors = 0
+                self.kopiaOtherOutputReadErrors = 0
+                self.livenessCheckAt = Date()
+                self.lastKopiaOutputAt = nil
+                self.stopReason = nil
+                self.lastStartAt = startedAt
+                self.lastFailure = nil
+                self.lastFailureAt = nil
+                self.lastAbortReason = nil
+                self.lastNetworkCheckAt = Date()
+                self.kopiaRanAfterMaterialization = ranAfterMaterialization
+                self.clearOperation(id: operationID)
+                self.state = .syncing
+
+                self.appendLog("kopia backup starting trigger=\(trigger) run_id=\(runID) pid=\(process.processIdentifier)")
+                self.appendLog("running: kopia snapshot create --no-progress \(Config.backupSource)")
+                self.appendDataToFile(
+                    "\(DateFormatters.log.string(from: Date())) raw kopia output starting run_id=\(runID) pid=\(process.processIdentifier)\n".data(using: .utf8) ?? Data(),
+                    path: Config.rawKopiaLogFile
+                )
+                self.writeStatus()
             }
         }
-
-        do {
-            try process.run()
-        } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
-            recordPreflightFailure("Unable to start Kopia: \(error.localizedDescription)")
-            return
-        }
-
-        activeProcess = process
-        activePipe = pipe
-        activePID = process.processIdentifier
-        kopiaOutputBuffer = ""
-        kopiaSuppressedDatalessReadErrors = 0
-        kopiaOtherOutputReadErrors = 0
-        livenessCheckAt = Date()
-        lastKopiaOutputAt = nil
-        stopReason = nil
-        lastStartAt = Date()
-        lastFailure = nil
-        lastFailureAt = nil
-        lastAbortReason = nil
-        lastNetworkCheckAt = Date()
-        kopiaRanAfterMaterialization = ranAfterMaterialization
-        state = .syncing
-
-        appendLog("kopia backup starting trigger=\(trigger) pid=\(process.processIdentifier)")
-        appendLog("running: kopia snapshot create --no-progress \(Config.backupSource)")
-        appendDataToFile(
-            "\(DateFormatters.log.string(from: Date())) raw kopia output starting pid=\(process.processIdentifier)\n".data(using: .utf8) ?? Data(),
-            path: Config.rawKopiaLogFile
-        )
-        writeStatus()
     }
 
     private func runProtectedDataProbes() -> [ProtectedDataProbeResult] {
@@ -1533,23 +2070,31 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func materializationAbortReason(for id: UUID) -> String? {
-        var reason: String?
-        DispatchQueue.main.sync {
-            guard activeMaterializationID == id else {
-                reason = "cloud materialization cancelled"
-                return
-            }
-
-            let now = Date()
-            if now.timeIntervalSince(lastMaterializationNetworkCheckAt) >= TimeInterval(Config.networkCheckIntervalSeconds) {
-                lastMaterializationNetworkCheckAt = now
-                network = currentNetworkSnapshot()
-            }
-            if Config.cloudMaterializationRequiresAllowedNetwork && !network.allowed {
-                reason = "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'"
-            }
+        if isMaterializationCancelled(id) {
+            return "cloud materialization cancelled"
         }
-        return reason
+
+        guard Config.cloudMaterializationRequiresAllowedNetwork else {
+            return nil
+        }
+
+        let now = Date()
+        materializationControlLock.lock()
+        let shouldCheckNetwork = now.timeIntervalSince(lastMaterializationNetworkCheckAt) >= TimeInterval(Config.networkCheckIntervalSeconds)
+        if shouldCheckNetwork {
+            lastMaterializationNetworkCheckAt = now
+        }
+        materializationControlLock.unlock()
+
+        guard shouldCheckNetwork else {
+            return nil
+        }
+
+        let snapshot = NetworkPolicy.current(isExpensive: false, isConstrained: false)
+        guard !snapshot.allowed else {
+            return nil
+        }
+        return "network no longer allowed: state=\(snapshot.state) ssid='\(snapshot.ssid ?? "")' reason='\(snapshot.reason)'"
     }
 
     private func abortedMaterializationSnapshot(reason: String) -> CloudMaterializationSnapshot {
@@ -1589,8 +2134,19 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     func stopBackup(reason: String = "manual stop") {
-        if activeMaterializationID != nil {
+        if let operationID = activeOperationID, activeMaterializationID == nil, activeProcess == nil {
+            clearOperation(id: operationID)
+            lastAbortReason = reason
+            appendLog("abort: \(reason); cancelled pending operation")
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
+        if let materializationID = activeMaterializationID {
+            markMaterializationCancelled(materializationID)
             activeMaterializationID = nil
+            clearOperation()
             lastAbortReason = reason
             appendLog("abort: \(reason); stopping cloud materialization")
             updateDerivedState()
@@ -1598,21 +2154,119 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
-        guard let process = activeProcess else {
+        if let process = activeProcess {
+            stopReason = reason
+            lastAbortReason = reason
+            appendLog("abort: \(reason); stopping kopia pid \(process.processIdentifier)")
+            process.terminate()
+
+            if !externalKopiaPIDs.isEmpty {
+                let pids = externalKopiaPIDs
+                appendLog("abort: also stopping external Kopia pids=\(pids.map { String($0) }.joined(separator: ","))")
+                ProcessInspector.terminate(pids: pids)
+                forceTerminateCapturedExternalPIDsAfterGracePeriod(
+                    pids: pids,
+                    reason: "stop-backup"
+                )
+            }
+
+            forceTerminateOwnedProcessAfterGracePeriod(process)
             return
         }
 
-        stopReason = reason
-        lastAbortReason = reason
-        appendLog("abort: \(reason); stopping kopia pid \(process.processIdentifier)")
-        process.terminate()
+        if let activePID {
+            stopReason = reason
+            lastAbortReason = reason
+            appendLog("abort: \(reason); stopping recovered Kopia pid \(activePID)")
+            ProcessInspector.terminate(pids: [activePID])
+            removeActiveRunRecord()
+            activePIDOwner = nil
+            activeRunID = nil
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self, weak process] in
-            guard let process, process.isRunning else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                self?.processQueue.async { [weak self] in
+                    let stillRunning = ProcessInspector.matchingKopiaSnapshots().contains(where: { $0.pid == activePID })
+                    DispatchQueue.main.async {
+                        guard let self else {
+                            return
+                        }
+                        guard stillRunning else {
+                            self.reconcileLiveKopiaProcesses(reason: "stop-recovered", shouldEvaluateSchedule: false)
+                            return
+                        }
+                        self.appendLog("abort: recovered Kopia pid \(activePID) did not stop after TERM; sending KILL")
+                        ProcessInspector.forceTerminate(pids: [activePID])
+                        self.reconcileLiveKopiaProcesses(reason: "stop-recovered", shouldEvaluateSchedule: false)
+                    }
+                }
+            }
+            self.activePID = nil
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
+        if activePIDOwner == "starting" {
+            lastAbortReason = reason
+            appendLog("abort: \(reason); clearing active run start marker")
+            removeActiveRunRecord()
+            activePIDOwner = nil
+            activeRunID = nil
+            activeOperation = nil
+            activeOperationStartedAt = nil
+            activeOperationDetail = nil
+            updateDerivedState()
+            writeStatus()
+            return
+        }
+
+        guard !externalKopiaPIDs.isEmpty else {
+            return
+        }
+
+        let pids = externalKopiaPIDs
+        lastAbortReason = reason
+        appendLog("abort: \(reason); stopping external Kopia pids=\(pids.map { String($0) }.joined(separator: ","))")
+        ProcessInspector.terminate(pids: pids)
+        forceTerminateCapturedExternalPIDsAfterGracePeriod(
+            pids: pids,
+            reason: "stop-external"
+        )
+        externalKopiaPIDs = []
+        updateDerivedState()
+        writeStatus()
+    }
+
+    private func forceTerminateOwnedProcessAfterGracePeriod(_ process: Process) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard process.isRunning else {
                 return
             }
             self?.appendLog("abort: kopia pid \(process.processIdentifier) did not stop after TERM; sending KILL")
             kill(process.processIdentifier, SIGKILL)
+        }
+    }
+
+    private func forceTerminateCapturedExternalPIDsAfterGracePeriod(
+        pids: [Int32],
+        reason: String
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            self?.processQueue.async { [weak self] in
+                let remaining = ProcessInspector.matchingKopiaSnapshots()
+                    .map(\.pid)
+                    .filter { pids.contains($0) }
+                DispatchQueue.main.async {
+                    guard let self else {
+                        return
+                    }
+                    if !remaining.isEmpty {
+                        self.appendLog("abort: external Kopia pids did not stop after TERM; sending KILL pids=\(remaining.map { String($0) }.joined(separator: ","))")
+                        ProcessInspector.forceTerminate(pids: remaining)
+                    }
+                    self.reconcileLiveKopiaProcesses(reason: reason, shouldEvaluateSchedule: false)
+                }
+            }
         }
     }
 
@@ -1639,7 +2293,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     func quit() {
-        if activeProcess != nil || activeMaterializationID != nil {
+        if canStopManual {
             stopBackup(reason: "monitor quitting")
         }
         appendLog("monitor quitting")
@@ -1650,10 +2304,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         switch state {
         case .ready:
             return "Ready"
+        case .startingBackup:
+            return "Starting Backup"
         case .preparingCloudFiles:
             return "Preparing Cloud Files"
         case .syncing:
             return "Syncing"
+        case .externalBackupDetected:
+            return "External Backup Detected"
         case .paused:
             return "Paused"
         case .needsPermission:
@@ -1675,10 +2333,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         switch state {
         case .ready:
             return "checkmark.circle"
+        case .startingBackup:
+            return "hourglass.circle"
         case .preparingCloudFiles:
             return "icloud.and.arrow.down"
         case .syncing:
             return "arrow.triangle.2.circlepath.circle"
+        case .externalBackupDetected:
+            return "person.crop.circle.badge.exclamationmark"
         case .paused:
             return "pause.circle"
         case .needsPermission, .needsFullDiskAccess, .cloudDownloadBlocked, .failed:
@@ -1691,11 +2353,22 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     var canStartManual: Bool {
-        activeProcess == nil && activeMaterializationID == nil && network.allowed
+        activeProcess == nil
+            && activePID == nil
+            && activeRunID == nil
+            && activeMaterializationID == nil
+            && activeOperationID == nil
+            && externalKopiaPIDs.isEmpty
+            && network.allowed
     }
 
     var canStopManual: Bool {
-        activeProcess != nil || activeMaterializationID != nil
+        activeProcess != nil
+            || activePID != nil
+            || activePIDOwner == "starting"
+            || activeMaterializationID != nil
+            || activeOperationID != nil
+            || !externalKopiaPIDs.isEmpty
     }
 
     var ssidText: String {
@@ -1723,20 +2396,39 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         return String(activePID)
     }
 
+    var activeOperationText: String? {
+        guard let activeOperation else {
+            return nil
+        }
+        let detail = activeOperationDetail ?? activeOperation
+        let elapsed = durationText(since: activeOperationStartedAt, now: Date())
+        return "\(detail), \(elapsed)"
+    }
+
+    var externalKopiaPIDsText: String? {
+        guard !externalKopiaPIDs.isEmpty else {
+            return nil
+        }
+        return externalKopiaPIDs.map { String($0) }.joined(separator: ",")
+    }
+
     var backupLivenessText: String {
-        guard activeProcess != nil else {
+        guard activePID != nil else {
             return "idle"
         }
 
         let elapsed = durationText(since: lastStartAt, now: livenessCheckAt)
         let heartbeatAge = relativeAgeText(since: livenessCheckAt, now: Date())
         let outputText: String
-        if let lastKopiaOutputAt {
+        if activeProcess == nil, activePIDOwner == "recovered" {
+            outputText = "output unavailable after monitor recovery"
+        } else if let lastKopiaOutputAt {
             outputText = "output \(relativeAgeText(since: lastKopiaOutputAt, now: livenessCheckAt)) ago"
         } else {
             outputText = "output quiet"
         }
-        return "running \(elapsed), checked \(heartbeatAge) ago, \(outputText)"
+        let owner = activePIDOwner ?? "unknown"
+        return "\(owner), running \(elapsed), checked \(heartbeatAge) ago, \(outputText)"
     }
 
     var kopiaNoiseText: String? {
@@ -1824,6 +2516,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
+        if activeOperationID != nil && activeMaterializationID == nil && activeProcess == nil {
+            writeStatus()
+        }
+
         if let process = activeProcess {
             if !process.isRunning {
                 handleBackupExit(status: process.terminationStatus)
@@ -1835,7 +2531,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             }
         }
 
-        if activeProcess != nil || activeMaterializationID != nil {
+        if activeProcess == nil, activePIDOwner == "recovered", activePID != nil {
+            if !network.allowed {
+                stopBackup(reason: "network no longer allowed: state=\(network.state) ssid='\(network.ssid ?? "")' reason='\(network.reason)'")
+                return
+            }
+            reconcileLiveKopiaProcesses(reason: "recovered-poll", shouldEvaluateSchedule: false)
+        } else if !externalKopiaPIDs.isEmpty {
+            reconcileLiveKopiaProcesses(reason: "external-poll", shouldEvaluateSchedule: false)
+        }
+
+        if activeProcess != nil || activePID != nil || activeMaterializationID != nil || activeOperationID != nil || !externalKopiaPIDs.isEmpty {
             writeStatus()
         }
     }
@@ -1863,10 +2569,25 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func evaluateSchedule(becameAllowed: Bool, reason: String) {
+        guard startupReady else {
+            return
+        }
         guard activeProcess == nil else {
             return
         }
+        guard activePID == nil else {
+            return
+        }
+        guard activeRunID == nil else {
+            return
+        }
         guard activeMaterializationID == nil else {
+            return
+        }
+        guard activeOperationID == nil else {
+            return
+        }
+        guard externalKopiaPIDs.isEmpty else {
             return
         }
 
@@ -1911,6 +2632,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         activePipe = nil
         activeProcess = nil
         activePID = nil
+        activeRunID = nil
+        activePIDOwner = nil
+        removeActiveRunRecord()
 
         let now = Date()
         if let reason = stopReason {
@@ -1937,7 +2661,32 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         refreshNetwork(reason: "backup-exit", shouldEvaluateSchedule: false)
     }
 
+    private func handleRecoveredBackupExit() {
+        appendLog("recovered Kopia process exit observed; status unavailable")
+        activePID = nil
+        activeRunID = nil
+        activePIDOwner = nil
+        removeActiveRunRecord()
+
+        let now = Date()
+        if let reason = stopReason {
+            lastAbortReason = reason
+            nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            appendLog("recovered Kopia backup aborted intentionally: \(reason)")
+            stopReason = nil
+        } else {
+            lastFailureAt = now
+            lastFailure = "Recovered Kopia process exited; exit status unavailable"
+            nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            appendLog("warning: recovered Kopia process exited; status unavailable")
+        }
+
+        updateDerivedState()
+        writeStatus()
+    }
+
     private func recordFailure(_ message: String) {
+        clearOperation()
         lastFailureAt = Date()
         lastFailure = message
         fullDiskAccessBlocked = false
@@ -1948,7 +2697,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         writeStatus()
     }
 
-    private func recordPreflightFailure(_ message: String) {
+    private func recordPreflightFailure(_ message: String, operationID: UUID? = nil) {
+        clearOperation(id: operationID)
         lastFailureAt = Date()
         lastFailure = message
         fullDiskAccessBlocked = false
@@ -1957,6 +2707,50 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         appendLog("failure: \(message); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
         updateDerivedState()
         writeStatus()
+    }
+
+    private func readActiveRunRecord() -> ActiveRunRecord? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: Config.activeRunFile)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ActiveRunRecord.self, from: data)
+    }
+
+    private func writeActiveRunRecord(_ record: ActiveRunRecord) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(record) else {
+            return
+        }
+        let url = URL(fileURLWithPath: Config.activeRunFile)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private func createActiveRunRecord(_ record: ActiveRunRecord) -> Bool {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(record) else {
+            return false
+        }
+        let url = URL(fileURLWithPath: Config.activeRunFile)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        do {
+            try data.write(to: url, options: .withoutOverwriting)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func removeActiveRunRecord() {
+        try? FileManager.default.removeItem(atPath: Config.activeRunFile)
     }
 
     private func childEnvironment() -> [String: String] {
@@ -1984,8 +2778,23 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
 
-        if activeProcess != nil {
+        if activeProcess != nil || activePID != nil {
             state = .syncing
+            return
+        }
+
+        if activePIDOwner == "starting" {
+            state = .startingBackup
+            return
+        }
+
+        if activeOperationID != nil {
+            state = .startingBackup
+            return
+        }
+
+        if !externalKopiaPIDs.isEmpty {
+            state = .externalBackupDetected
             return
         }
 
@@ -2048,15 +2857,53 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 nextRunAt = nil
             }
         }
+    }
 
-        if lastSuccessAt == nil, let seeded = seedLastSuccessFromLog() {
-            lastSuccessAt = seeded
-            nextRunAt = seeded.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+    private func seedLastSuccessFromLogIfNeededThenReconcile() {
+        guard lastSuccessAt == nil else {
+            reconcileLiveKopiaProcesses(
+                reason: "startup",
+                shouldEvaluateSchedule: true,
+                markStartupReady: true
+            )
+            return
+        }
+
+        processQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+            let seeded = self.seedLastSuccessFromLog()
+            DispatchQueue.main.async {
+                if self.lastSuccessAt == nil, let seeded {
+                    self.lastSuccessAt = seeded
+                    self.nextRunAt = seeded.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+                    self.appendLog("seeded last_success_at from log tail")
+                }
+                self.reconcileLiveKopiaProcesses(
+                    reason: "startup",
+                    shouldEvaluateSchedule: true,
+                    markStartupReady: true
+                )
+            }
         }
     }
 
     private func seedLastSuccessFromLog() -> Date? {
-        guard let text = try? String(contentsOfFile: Config.logFile, encoding: .utf8) else {
+        let url = URL(fileURLWithPath: Config.logFile)
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        let tailBytes: UInt64 = 1024 * 1024
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let startOffset = endOffset > tailBytes ? endOffset - tailBytes : 0
+        try? handle.seek(toOffset: startOffset)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else {
             return nil
         }
 
@@ -2108,7 +2955,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
             raw_kopia_log_file: Config.rawKopiaLogFile,
-            status_file: Config.statusFile
+            status_file: Config.statusFile,
+            active_run_file: Config.activeRunFile
         )
     }
 
@@ -2123,12 +2971,19 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             network_is_expensive: network.is_expensive,
             network_is_constrained: network.is_constrained,
             next_run_at: dateString(nextRunAt),
+            active_operation: activeOperation,
+            active_operation_started_at: dateString(activeOperationStartedAt),
+            active_operation_detail: activeOperationDetail,
+            operation_elapsed_seconds: activeOperationStartedAt == nil ? nil : Int(Date().timeIntervalSince(activeOperationStartedAt!)),
             active_pid: activePID,
+            active_run_id: activeRunID,
+            active_pid_owner: activePIDOwner,
+            external_kopia_pids: externalKopiaPIDs,
             last_start_at: dateString(lastStartAt),
             last_success_at: dateString(lastSuccessAt),
             last_success_cloud_coverage: lastSuccessCloudCoverage,
-            backup_elapsed_seconds: activeProcess == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastStartAt ?? livenessCheckAt)),
-            last_liveness_check_at: activeProcess == nil && activeMaterializationID == nil ? nil : dateString(livenessCheckAt),
+            backup_elapsed_seconds: activePID == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastStartAt ?? livenessCheckAt)),
+            last_liveness_check_at: activePID == nil && activeMaterializationID == nil && activeOperationID == nil && externalKopiaPIDs.isEmpty ? nil : dateString(livenessCheckAt),
             last_kopia_output_at: dateString(lastKopiaOutputAt),
             kopia_output_idle_seconds: activeProcess == nil || lastKopiaOutputAt == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastKopiaOutputAt!)),
             kopia_suppressed_dataless_read_errors: activeProcess == nil ? nil : kopiaSuppressedDatalessReadErrors,
@@ -2400,7 +3255,14 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             network_is_expensive: network.is_expensive,
             network_is_constrained: network.is_constrained,
             next_run_at: nil,
+            active_operation: nil,
+            active_operation_started_at: nil,
+            active_operation_detail: nil,
+            operation_elapsed_seconds: nil,
             active_pid: nil,
+            active_run_id: nil,
+            active_pid_owner: nil,
+            external_kopia_pids: [],
             last_start_at: nil,
             last_success_at: nil,
             last_success_cloud_coverage: nil,
@@ -2436,7 +3298,8 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 monitor_launchd_label: Config.monitorLaunchdLabel,
                 log_file: Config.logFile,
                 raw_kopia_log_file: Config.rawKopiaLogFile,
-                status_file: Config.statusFile
+                status_file: Config.statusFile,
+                active_run_file: Config.activeRunFile
             )
         )
         printEncoded(status)
@@ -2500,7 +3363,14 @@ func printStatusJSONAndExit() -> Never {
         network_is_expensive: network.is_expensive,
         network_is_constrained: network.is_constrained,
         next_run_at: nil,
+        active_operation: nil,
+        active_operation_started_at: nil,
+        active_operation_detail: nil,
+        operation_elapsed_seconds: nil,
         active_pid: nil,
+        active_run_id: nil,
+        active_pid_owner: nil,
+        external_kopia_pids: [],
         last_start_at: nil,
         last_success_at: nil,
         last_success_cloud_coverage: nil,
@@ -2536,7 +3406,8 @@ func printStatusJSONAndExit() -> Never {
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
             raw_kopia_log_file: Config.rawKopiaLogFile,
-            status_file: Config.statusFile
+            status_file: Config.statusFile,
+            active_run_file: Config.activeRunFile
         )
     )
     printEncodedJSON(status)
@@ -2595,8 +3466,14 @@ struct KopiaBackupMonitorApp: App {
             Text("Last success: \(monitor.lastSuccessText)")
             Text("Next run: \(monitor.nextRunText)")
             Text("Active PID: \(monitor.activePIDText)")
+            if let operation = monitor.activeOperationText {
+                Text("Operation: \(operation)")
+            }
             if monitor.activePID != nil {
                 Text("Backup: \(monitor.backupLivenessText)")
+            }
+            if let externalPIDs = monitor.externalKopiaPIDsText {
+                Text("External Kopia PIDs: \(externalPIDs)")
             }
             if let kopiaNoise = monitor.kopiaNoiseText {
                 Text(kopiaNoise)

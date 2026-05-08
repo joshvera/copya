@@ -36,6 +36,7 @@ runner_dir = data("runner_dir")
 log_file = data("log_file")
 raw_kopia_log_file = data("raw_kopia_log_file")
 status_file = data("status_file")
+active_run_file = data("active_run_file")
 app_name = data("app_name")
 app_install_dir = data("app_install_dir")
 app_executable_name = data("app_executable_name")
@@ -43,6 +44,7 @@ app_bundle_identifier = data("app_bundle_identifier")
 legacy_monitor_app_names = data("legacy_monitor_app_names")
 app_signing_identity = data("app_signing_identity")
 onepassword_cli_package = data("onepassword_cli_package")
+onepassword_read_timeout_seconds = data("onepassword_read_timeout_seconds")
 kopia_password_ref = data("kopia_password_ref")
 use_sudo = bool_data("use_sudo")
 
@@ -85,6 +87,7 @@ template_context = {
     "app_executable_path": app_executable_path,
     "app_install_dir": app_install_dir,
     "app_name": app_name,
+    "active_run_file": active_run_file,
     "backup_ignore_file": backup_ignore_file,
     "backup_ignore_patterns": backup_ignore_patterns,
     "backup_source": backup_source,
@@ -99,6 +102,7 @@ template_context = {
     "log_file": log_file,
     "monitor_launchd_label": monitor_launchd_label,
     "network_check_interval_seconds": network_check_interval_seconds,
+    "onepassword_read_timeout_seconds": onepassword_read_timeout_seconds,
     "preflight_failure_retry_seconds": preflight_failure_retry_seconds,
     "raw_kopia_log_file": raw_kopia_log_file,
     "protected_data_probe_paths": protected_data_probe_paths,
@@ -298,7 +302,6 @@ server.shell(
     commands=[
         f'launchctl bootout "{launchd_domain}" "{legacy_backup_plist_path}" || true',
         f'pkill -TERM -f "^{legacy_runner_path}$" || true',
-        f'pkill -TERM -f "^kopia snapshot create --no-progress {backup_source}$" || true',
         f'rm -f "{legacy_backup_plist_path}" "{legacy_runner_path}" '
         f'"{legacy_helper_source_path}" "{legacy_helper_stamp_path}"',
         f'rm -rf "{legacy_helper_bundle_dir}"',
