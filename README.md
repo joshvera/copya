@@ -94,6 +94,13 @@ empty. Desktop, Documents, iCloud Drive containers, Dropbox/FileProvider roots,
 and protected app data are intended to be backed up when macOS allows COPYA and
 Kopia to read them.
 
+COPYA also renders a small managed set of tolerated ephemeral ignores from
+`backup_tolerated_ephemeral_ignore_patterns`. These are narrow, anchored
+system-generated paths such as CoreSpotlight indexes and FileProvider tombstones.
+They are separate from user ignores and must not cover Desktop, Documents,
+Downloads, iCloud Drive real files, Mail, Messages, Safari, Photos, WhatsApp
+data, broad app containers, or broad FileProvider roots.
+
 Cloud-backed roots are configured in `cloud_materialization_roots`. Before
 starting Kopia, COPYA probes protected-data access, estimates cloud placeholder
 capacity, attempts best-effort iCloud downloads with `brctl download` and macOS
@@ -124,9 +131,11 @@ placeholder sizes are reported as advisory because COPYA does not have a
 reliable provider-wide "download everything" API for them in v1.
 
 Real per-file read failures are reported separately from dataless placeholders,
-but they do not block Kopia by themselves. COPYA still blocks on network denial,
-missing SSID visibility, permission failures, timeout, or an explicit abort.
-Kopia is the authoritative snapshot engine for the final backup result.
+but they do not block Kopia by themselves. Kopia can create a restorable snapshot
+and still exit non-zero after reporting fatal per-file read errors. COPYA records
+that as `Backup Partial` when only tolerated system/placeholder paths failed, or
+`Backup Partial, Needs Attention` when user-data, protected app data, or unknown
+paths failed. A clean `last_success_at` is still only set on Kopia exit `0`.
 
 The main COPYA log summarizes known dataless/deadlock read noise. Raw Kopia
 output is retained separately at:
@@ -215,7 +224,8 @@ The menu bar app shows:
 
 - current state: Ready, Starting Backup, Preparing Cloud Files, Syncing,
   External Backup Detected, Paused, Needs Permission, Needs Full Disk Access,
-  Needs Disk Space, Cloud Download Blocked, Cloud Partial, Failed, or
+  Needs Disk Space, Cloud Download Blocked, Cloud Partial, Backup Partial,
+  Failed, or
   Disabled;
 - current SSID and policy reason;
 - cloud preparation status;
@@ -223,7 +233,8 @@ The menu bar app shows:
 - dataless placeholder and real read-failure counts when cloud coverage is
   partial;
 - next scheduled run;
-- last successful backup;
+- last successful clean backup;
+- last restorable snapshot, including partial result and issue counts;
 - active Kopia PID when syncing;
 - active operation detail while COPYA is checking existing processes, reading
   1Password, or launching Kopia;
@@ -256,6 +267,12 @@ If Kopia exits non-zero, COPYA classifies common fatal causes from Kopia output.
 `storage_cap_exceeded` is reported as a B2 storage cap failure. A disk-space
 failure means the local Mac ran out of room for Kopia cache/temp/log writes, not
 that the B2 repository is corrupt.
+
+For per-file read errors, COPYA parses each COPYA-owned run from its start
+boundary through its exit status. If the run created a snapshot, COPYA stores
+`last_snapshot_id`, `last_snapshot_result`, categorized issue counts, and sample
+paths in `status.json`. Unknown per-file errors are never tolerated by default;
+they are treated as action-required until explicitly classified or fixed.
 
 Kopia's internal logs are diagnostic data used for liveness. COPYA prunes
 inactive internal Kopia logs before runs, keeping the newest inactive files up
@@ -295,6 +312,8 @@ Useful debug commands:
 ```bash
 "/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --status-json
 "/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --network-json
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --classify-last-kopia-errors
+"/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor" --classify-kopia-log /Users/vera/.local/kopia-backup/kopia-raw.log
 launchctl print gui/$(id -u)/com.vera.kopia.monitor
 pgrep -fl 'kopia-backup-monitor|kopia snapshot create'
 cat /Users/vera/.local/kopia-backup/active-run.json
@@ -329,9 +348,14 @@ Scheduling rules:
   `Cloud Download Blocked` and retry later;
 - if Kopia succeeds while dataless placeholders remain, show `Cloud Partial`
   instead of hiding the incomplete cloud coverage;
+- if Kopia creates a snapshot but reports tolerated per-file read errors, show
+  `Backup Partial` and schedule the next run from that snapshot completion;
+- if Kopia creates a snapshot but reports user-data or unknown per-file read
+  errors, show `Backup Partial, Needs Attention`, keep issue samples in
+  `status.json`, and schedule the next run from that snapshot completion;
 - if a preflight step such as reading the 1Password secret fails, retry that
   preflight after `preflight_failure_retry_seconds`;
-- after a successful backup, schedule the next run at
+- after a clean successful backup, schedule the next run at
   `last_success_at + run_interval_seconds`;
 - if a scheduled run arrives while the network is denied or degraded, skip
   that interval and schedule the next one;

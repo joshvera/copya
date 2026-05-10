@@ -4,6 +4,40 @@ home = "/Users/vera"
 backup_source = "/Users/vera"
 backup_ignore_file = "/Users/vera/.kopiaignore"
 backup_ignore_patterns = []
+backup_tolerated_ephemeral_ignore_patterns = [
+    {
+        "pattern": "/Library/Metadata/CoreSpotlight/*",
+        "reason": "CoreSpotlight indexes are system-generated and protected.",
+    },
+    {
+        "pattern": "/Library/Application Support/FileProvider/*/wharf/tombstone/*",
+        "reason": "FileProvider tombstones are provider bookkeeping, not user files.",
+    },
+    {
+        "pattern": "/Library/DuetExpertCenter/*",
+        "reason": "DuetExpertCenter prediction caches are system-generated.",
+    },
+    {
+        "pattern": "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/*",
+        "reason": "CoreSpeech cache files are generated speech assets.",
+    },
+    {
+        "pattern": "/Library/Containers/*/Data/Library/Saved Application State/*",
+        "reason": "Saved Application State is restorable UI cache data.",
+    },
+    {
+        "pattern": "/Library/Daemon Containers/*/Data/com.apple.milod/*",
+        "reason": "milo daemon WAL files are protected generated state.",
+    },
+    {
+        "pattern": "/Library/Group Containers/group.com.apple.secure-control-center-preferences/*",
+        "reason": "Secure control center preference cache is protected system state.",
+    },
+    {
+        "pattern": "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
+        "reason": "Maps ReportAProblem staging files are app-generated scratch data.",
+    },
+]
 
 protected_data_probe_paths = [
     "/Users/vera/Desktop",

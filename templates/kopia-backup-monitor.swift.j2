@@ -18,6 +18,11 @@ enum Config {
         "{{ pattern }}",
 {% endfor %}
     ]
+    static let backupToleratedEphemeralIgnorePatterns: [String] = [
+{% for entry in backup_tolerated_ephemeral_ignore_patterns %}
+        "{{ entry.pattern }}",
+{% endfor %}
+    ]
     static let protectedDataProbePaths: [String] = [
 {% for path in protected_data_probe_paths %}
         "{{ path }}",
@@ -97,6 +102,7 @@ struct ConfigSummary: Codable {
     var backup_source: String
     var backup_ignore_file: String
     var backup_ignore_patterns: [String]
+    var backup_tolerated_ephemeral_ignore_patterns: [String]
     var protected_data_probe_paths: [String]
     var cloud_materialization_roots: [String]
     var cloud_materialization_enabled: Bool
@@ -132,6 +138,7 @@ extension ConfigSummary {
         case backup_source
         case backup_ignore_file
         case backup_ignore_patterns
+        case backup_tolerated_ephemeral_ignore_patterns
         case protected_data_probe_paths
         case cloud_materialization_roots
         case cloud_materialization_enabled
@@ -167,6 +174,7 @@ extension ConfigSummary {
         backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
         backup_ignore_file = try container.decodeIfPresent(String.self, forKey: .backup_ignore_file) ?? Config.backupIgnoreFile
         backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_ignore_patterns) ?? Config.backupIgnorePatterns
+        backup_tolerated_ephemeral_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_tolerated_ephemeral_ignore_patterns) ?? Config.backupToleratedEphemeralIgnorePatterns
         protected_data_probe_paths = try container.decodeIfPresent([String].self, forKey: .protected_data_probe_paths) ?? Config.protectedDataProbePaths
         cloud_materialization_roots = try container.decodeIfPresent([String].self, forKey: .cloud_materialization_roots) ?? Config.cloudMaterializationRoots
         cloud_materialization_enabled = try container.decodeIfPresent(Bool.self, forKey: .cloud_materialization_enabled) ?? Config.cloudMaterializationEnabled
@@ -313,6 +321,80 @@ struct CloudCapacityEstimate: Codable {
     }
 }
 
+enum CloudPlaceholderKind: String, Codable {
+    case file
+    case directory
+    case package
+    case other
+}
+
+struct CloudPlaceholderRecord {
+    var path: String
+    var kind: CloudPlaceholderKind
+    var isICloudActionable: Bool
+    var downloadRequestError: String?
+}
+
+enum CloudPlaceholderClassifier {
+    static func record(
+        for url: URL,
+        root: String,
+        values: URLResourceValues?,
+        statSnapshot: FileFlags.Snapshot?
+    ) -> CloudPlaceholderRecord? {
+        guard let statSnapshot, FileFlags.isDataless(statSnapshot) else {
+            return nil
+        }
+
+        return CloudPlaceholderRecord(
+            path: url.path,
+            kind: kind(values: values, url: url),
+            isICloudActionable: providerClass(for: url, root: root, values: values) == "icloud_actionable",
+            downloadRequestError: nil
+        )
+    }
+
+    static func kind(values: URLResourceValues?, url: URL? = nil) -> CloudPlaceholderKind {
+        if values?.isPackage == true {
+            return .package
+        }
+        if values?.isDirectory == true {
+            return .directory
+        }
+        if values?.isRegularFile == true {
+            return .file
+        }
+        if let url {
+            var isDirectory = ObjCBool(false)
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return .directory
+            }
+        }
+        return .other
+    }
+
+    static func providerClass(forRoot root: String) -> String {
+        if root.contains("/Library/Mobile Documents") {
+            return "icloud_actionable"
+        }
+        if root.contains("/Library/CloudStorage") {
+            return "fileprovider_advisory"
+        }
+        return "local_unknown"
+    }
+
+    static func providerClass(for url: URL, root: String, values: URLResourceValues?) -> String {
+        if values?.isUbiquitousItem == true || root.contains("/Library/Mobile Documents") {
+            return "icloud_actionable"
+        }
+        if url.path.contains("/Library/CloudStorage/") || root.contains("/Library/CloudStorage") {
+            return "fileprovider_advisory"
+        }
+        return "local_unknown"
+    }
+}
+
 struct ProtectedDataProbeResult: Codable {
     var path: String
     var exists: Bool
@@ -335,6 +417,12 @@ struct CloudMaterializationRootResult: Codable {
     var last_error: String?
     var dataless_sample_paths: [String]
     var read_failure_sample_paths: [String]
+    var total_dataless_entries: Int?
+    var resolved_dataless_placeholders: Int?
+    var download_request_failures: Int?
+    var placeholder_resolution_failures: Int?
+    var dataless_kind_counts: [String: Int]?
+    var placeholder_failure_sample_paths: [String]
 
     enum CodingKeys: String, CodingKey {
         case root
@@ -350,6 +438,12 @@ struct CloudMaterializationRootResult: Codable {
         case last_error
         case dataless_sample_paths
         case read_failure_sample_paths
+        case total_dataless_entries
+        case resolved_dataless_placeholders
+        case download_request_failures
+        case placeholder_resolution_failures
+        case dataless_kind_counts
+        case placeholder_failure_sample_paths
     }
 
     init(
@@ -365,7 +459,13 @@ struct CloudMaterializationRootResult: Codable {
         timed_out: Bool,
         last_error: String?,
         dataless_sample_paths: [String] = [],
-        read_failure_sample_paths: [String] = []
+        read_failure_sample_paths: [String] = [],
+        total_dataless_entries: Int? = nil,
+        resolved_dataless_placeholders: Int? = nil,
+        download_request_failures: Int? = nil,
+        placeholder_resolution_failures: Int? = nil,
+        dataless_kind_counts: [String: Int]? = nil,
+        placeholder_failure_sample_paths: [String] = []
     ) {
         self.root = root
         self.exists = exists
@@ -380,6 +480,12 @@ struct CloudMaterializationRootResult: Codable {
         self.last_error = last_error
         self.dataless_sample_paths = dataless_sample_paths
         self.read_failure_sample_paths = read_failure_sample_paths
+        self.total_dataless_entries = total_dataless_entries
+        self.resolved_dataless_placeholders = resolved_dataless_placeholders
+        self.download_request_failures = download_request_failures
+        self.placeholder_resolution_failures = placeholder_resolution_failures
+        self.dataless_kind_counts = dataless_kind_counts
+        self.placeholder_failure_sample_paths = placeholder_failure_sample_paths
     }
 
     init(from decoder: Decoder) throws {
@@ -397,6 +503,12 @@ struct CloudMaterializationRootResult: Codable {
         last_error = try container.decodeIfPresent(String.self, forKey: .last_error)
         dataless_sample_paths = try container.decodeIfPresent([String].self, forKey: .dataless_sample_paths) ?? []
         read_failure_sample_paths = try container.decodeIfPresent([String].self, forKey: .read_failure_sample_paths) ?? []
+        total_dataless_entries = try container.decodeIfPresent(Int.self, forKey: .total_dataless_entries)
+        resolved_dataless_placeholders = try container.decodeIfPresent(Int.self, forKey: .resolved_dataless_placeholders)
+        download_request_failures = try container.decodeIfPresent(Int.self, forKey: .download_request_failures)
+        placeholder_resolution_failures = try container.decodeIfPresent(Int.self, forKey: .placeholder_resolution_failures)
+        dataless_kind_counts = try container.decodeIfPresent([String: Int].self, forKey: .dataless_kind_counts)
+        placeholder_failure_sample_paths = try container.decodeIfPresent([String].self, forKey: .placeholder_failure_sample_paths) ?? []
     }
 }
 
@@ -415,6 +527,10 @@ struct CloudMaterializationSnapshot: Codable {
     var total_failures: Int
     var total_dataless_placeholders: Int? = nil
     var total_read_failures: Int? = nil
+    var total_dataless_entries: Int? = nil
+    var total_resolved_dataless_placeholders: Int? = nil
+    var total_download_request_failures: Int? = nil
+    var total_placeholder_resolution_failures: Int? = nil
     var cloud_coverage: String? = nil
     var roots: [CloudMaterializationRootResult]
 }
@@ -436,10 +552,38 @@ extension CloudMaterializationSnapshot {
             total_failures: 0,
             total_dataless_placeholders: 0,
             total_read_failures: 0,
+            total_dataless_entries: 0,
+            total_resolved_dataless_placeholders: 0,
+            total_download_request_failures: 0,
+            total_placeholder_resolution_failures: 0,
             cloud_coverage: nil,
             roots: []
         )
     }
+}
+
+struct KopiaSnapshotIssueSample: Codable {
+    var category: String
+    var path: String?
+    var detail: String
+}
+
+struct KopiaParsedRun: Codable {
+    var run_id: String?
+    var pid: Int32?
+    var started_at: String?
+    var completed_at: String?
+    var exit_status: Int32?
+    var snapshot_id: String?
+    var snapshot_root: String?
+    var snapshot_duration: String?
+    var snapshot_result: String
+    var fatal_error_count: Int
+    var tolerated_count: Int
+    var action_required_count: Int
+    var unclassified_count: Int
+    var categorized_counts: [String: Int]
+    var samples: [KopiaSnapshotIssueSample]
 }
 
 struct StatusSnapshot: Codable {
@@ -463,6 +607,17 @@ struct StatusSnapshot: Codable {
     var last_start_at: String?
     var last_success_at: String?
     var last_success_cloud_coverage: String?
+    var last_snapshot_at: String?
+    var last_snapshot_id: String?
+    var last_snapshot_root: String?
+    var last_snapshot_duration: String?
+    var last_snapshot_result: String?
+    var last_snapshot_error_count: Int?
+    var last_snapshot_tolerated_count: Int?
+    var last_snapshot_action_required_count: Int?
+    var last_snapshot_unclassified_count: Int?
+    var last_snapshot_issue_counts: [String: Int]?
+    var last_snapshot_issue_samples: [KopiaSnapshotIssueSample]?
     var backup_elapsed_seconds: Int?
     var last_liveness_check_at: String?
     var last_kopia_output_at: String?
@@ -503,6 +658,17 @@ struct StatusSnapshot: Codable {
         case last_start_at
         case last_success_at
         case last_success_cloud_coverage
+        case last_snapshot_at
+        case last_snapshot_id
+        case last_snapshot_root
+        case last_snapshot_duration
+        case last_snapshot_result
+        case last_snapshot_error_count
+        case last_snapshot_tolerated_count
+        case last_snapshot_action_required_count
+        case last_snapshot_unclassified_count
+        case last_snapshot_issue_counts
+        case last_snapshot_issue_samples
         case backup_elapsed_seconds
         case last_liveness_check_at
         case last_kopia_output_at
@@ -546,6 +712,17 @@ struct StatusSnapshot: Codable {
         try encodeOptional(last_start_at, into: &container, forKey: .last_start_at)
         try encodeOptional(last_success_at, into: &container, forKey: .last_success_at)
         try encodeOptional(last_success_cloud_coverage, into: &container, forKey: .last_success_cloud_coverage)
+        try encodeOptional(last_snapshot_at, into: &container, forKey: .last_snapshot_at)
+        try encodeOptional(last_snapshot_id, into: &container, forKey: .last_snapshot_id)
+        try encodeOptional(last_snapshot_root, into: &container, forKey: .last_snapshot_root)
+        try encodeOptional(last_snapshot_duration, into: &container, forKey: .last_snapshot_duration)
+        try encodeOptional(last_snapshot_result, into: &container, forKey: .last_snapshot_result)
+        try encodeOptional(last_snapshot_error_count, into: &container, forKey: .last_snapshot_error_count)
+        try encodeOptional(last_snapshot_tolerated_count, into: &container, forKey: .last_snapshot_tolerated_count)
+        try encodeOptional(last_snapshot_action_required_count, into: &container, forKey: .last_snapshot_action_required_count)
+        try encodeOptional(last_snapshot_unclassified_count, into: &container, forKey: .last_snapshot_unclassified_count)
+        try encodeOptional(last_snapshot_issue_counts, into: &container, forKey: .last_snapshot_issue_counts)
+        try encodeOptional(last_snapshot_issue_samples, into: &container, forKey: .last_snapshot_issue_samples)
         try encodeOptional(backup_elapsed_seconds, into: &container, forKey: .backup_elapsed_seconds)
         try encodeOptional(last_liveness_check_at, into: &container, forKey: .last_liveness_check_at)
         try encodeOptional(last_kopia_output_at, into: &container, forKey: .last_kopia_output_at)
@@ -590,6 +767,7 @@ enum BackupState: String {
     case needsDiskSpace = "needs_disk_space"
     case cloudDownloadBlocked = "cloud_download_blocked"
     case cloudPartial = "cloud_partial"
+    case backupPartial = "backup_partial"
     case failed
     case disabled
 }
@@ -1724,7 +1902,7 @@ enum CloudCapacityEstimator {
         let rootURL = URL(fileURLWithPath: root)
         var isDirectory = ObjCBool(false)
         let exists = FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory)
-        var provider = providerClass(forRoot: root)
+        var provider = CloudPlaceholderClassifier.providerClass(forRoot: root)
         var datalessPlaceholders = 0
         var iCloudKnownBytes: Int64 = 0
         var iCloudUnknownCount = 0
@@ -1766,11 +1944,82 @@ enum CloudCapacityEstimator {
         }
 
         let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isPackageKey,
             .isRegularFileKey,
             .fileSizeKey,
             .isUbiquitousItemKey,
             .volumeIdentifierKey,
         ]
+
+        func recordPlaceholder(
+            _ placeholder: CloudPlaceholderRecord,
+            values: URLResourceValues?,
+            statSnapshot: FileFlags.Snapshot
+        ) {
+            datalessPlaceholders += 1
+            rememberSample(placeholder.path)
+            let fileProvider = CloudPlaceholderClassifier.providerClass(
+                for: URL(fileURLWithPath: placeholder.path),
+                root: root,
+                values: values
+            )
+            if fileProvider == "icloud_actionable" {
+                provider = "icloud_actionable"
+                let fileVolume = DiskSpaceProbe.volumeSnapshot(for: placeholder.path)
+                var accumulator = accumulatorForVolume(
+                    fileVolume.volume_key,
+                    fallbackPath: fileVolume.checked_path,
+                    volumeAccumulators: &volumeAccumulators
+                )
+                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
+                    iCloudKnownBytes += logicalBytes
+                    accumulator.iCloudKnownBytes += logicalBytes
+                } else {
+                    iCloudUnknownCount += 1
+                    accumulator.iCloudUnknownFallbackBytes += Config.unknownICloudPlaceholderEstimateBytes
+                }
+                volumeAccumulators[accumulator.volumeKey] = accumulator
+            } else if fileProvider == "fileprovider_advisory" {
+                provider = provider == "icloud_actionable" ? provider : "fileprovider_advisory"
+                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
+                    fileProviderKnownBytes += logicalBytes
+                } else {
+                    fileProviderUnknownCount += 1
+                }
+            } else {
+                localUnknownCount += 1
+            }
+        }
+
+        let rootValues = try? rootURL.resourceValues(forKeys: keys)
+        if let rootStatSnapshot = FileFlags.snapshot(for: rootURL),
+           let rootPlaceholder = CloudPlaceholderClassifier.record(
+                for: rootURL,
+                root: root,
+                values: rootValues,
+                statSnapshot: rootStatSnapshot
+           ) {
+            recordPlaceholder(rootPlaceholder, values: rootValues, statSnapshot: rootStatSnapshot)
+            if rootPlaceholder.kind == .directory || rootPlaceholder.kind == .package {
+                return CloudCapacityRootEstimate(
+                    root: root,
+                    exists: true,
+                    provider: provider,
+                    volume_key: rootVolume.volume_key,
+                    dataless_placeholders: datalessPlaceholders,
+                    icloud_known_bytes: iCloudKnownBytes,
+                    icloud_unknown_count: iCloudUnknownCount,
+                    icloud_unknown_fallback_bytes: Int64(iCloudUnknownCount) * Config.unknownICloudPlaceholderEstimateBytes,
+                    fileprovider_advisory_known_bytes: fileProviderKnownBytes,
+                    fileprovider_advisory_unknown_count: fileProviderUnknownCount,
+                    local_unknown_count: localUnknownCount,
+                    sample_paths: samplePaths,
+                    errors: errors
+                )
+            }
+        }
+
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Array(keys),
@@ -1800,43 +2049,23 @@ enum CloudCapacityEstimator {
 
         for case let url as URL in enumerator {
             let statSnapshot = FileFlags.snapshot(for: url)
-            guard let statSnapshot, (statSnapshot.flags & 0x40000000) != 0 else {
+            guard let statSnapshot else {
                 continue
             }
 
             let values = try? url.resourceValues(forKeys: keys)
-            if values?.isRegularFile == false {
+            guard let placeholder = CloudPlaceholderClassifier.record(
+                for: url,
+                root: root,
+                values: values,
+                statSnapshot: statSnapshot
+            ) else {
                 continue
             }
 
-            datalessPlaceholders += 1
-            rememberSample(url.path)
-            let fileProvider = providerClass(for: url, root: root, values: values)
-            if fileProvider == "icloud_actionable" {
-                provider = "icloud_actionable"
-                let fileVolume = DiskSpaceProbe.volumeSnapshot(for: url.path)
-                var accumulator = accumulatorForVolume(
-                    fileVolume.volume_key,
-                    fallbackPath: fileVolume.checked_path,
-                    volumeAccumulators: &volumeAccumulators
-                )
-                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
-                    iCloudKnownBytes += logicalBytes
-                    accumulator.iCloudKnownBytes += logicalBytes
-                } else {
-                    iCloudUnknownCount += 1
-                    accumulator.iCloudUnknownFallbackBytes += Config.unknownICloudPlaceholderEstimateBytes
-                }
-                volumeAccumulators[accumulator.volumeKey] = accumulator
-            } else if fileProvider == "fileprovider_advisory" {
-                provider = provider == "icloud_actionable" ? provider : "fileprovider_advisory"
-                if let logicalBytes = logicalSize(values: values, statSnapshot: statSnapshot) {
-                    fileProviderKnownBytes += logicalBytes
-                } else {
-                    fileProviderUnknownCount += 1
-                }
-            } else {
-                localUnknownCount += 1
+            recordPlaceholder(placeholder, values: values, statSnapshot: statSnapshot)
+            if placeholder.kind == .directory || placeholder.kind == .package {
+                enumerator.skipDescendants()
             }
         }
 
@@ -1855,26 +2084,6 @@ enum CloudCapacityEstimator {
             sample_paths: samplePaths,
             errors: errors
         )
-    }
-
-    private static func providerClass(forRoot root: String) -> String {
-        if root.contains("/Library/Mobile Documents") {
-            return "icloud_actionable"
-        }
-        if root.contains("/Library/CloudStorage") {
-            return "fileprovider_advisory"
-        }
-        return "local_unknown"
-    }
-
-    private static func providerClass(for url: URL, root: String, values: URLResourceValues?) -> String {
-        if values?.isUbiquitousItem == true || root.contains("/Library/Mobile Documents") {
-            return "icloud_actionable"
-        }
-        if url.path.contains("/Library/CloudStorage/") || root.contains("/Library/CloudStorage") {
-            return "fileprovider_advisory"
-        }
-        return "local_unknown"
     }
 
     private static func logicalSize(values: URLResourceValues?, statSnapshot: FileFlags.Snapshot) -> Int64? {
@@ -1988,6 +2197,374 @@ enum KopiaFailureClassifier {
             detail: "status=\(status)",
             priority: 0
         )
+    }
+}
+
+enum KopiaSnapshotResult {
+    static let clean = "clean"
+    static let partialTolerated = "partial_tolerated"
+    static let partialActionRequired = "partial_action_required"
+    static let failed = "failed"
+}
+
+enum KopiaIssueCategory {
+    static let cloudPlaceholder = "cloud_placeholder"
+    static let toleratedSystemEphemeral = "tolerated_system_ephemeral"
+    static let actionableUserData = "actionable_user_data"
+    static let unclassified = "unclassified"
+}
+
+enum PathPatternMatcher {
+    static func normalizedRelativePath(_ path: String) -> String {
+        var normalized = path
+        let root = Config.backupSource + "/"
+        if normalized.hasPrefix(root) {
+            normalized.removeFirst(root.count)
+        }
+        while normalized.hasPrefix("/") {
+            normalized.removeFirst()
+        }
+        return normalized
+    }
+
+    static func matchesAny(_ patterns: [String], relativePath: String) -> Bool {
+        patterns.contains { pattern in
+            matches(pattern: pattern, relativePath: relativePath)
+        }
+    }
+
+    static func matches(pattern: String, relativePath: String) -> Bool {
+        var normalizedPattern = pattern
+        while normalizedPattern.hasPrefix("/") {
+            normalizedPattern.removeFirst()
+        }
+        let normalizedPath = normalizedRelativePath(relativePath)
+        return Darwin.fnmatch(normalizedPattern, normalizedPath, 0) == 0
+    }
+}
+
+enum KopiaFileIssueClassifier {
+    static func classify(line: String) -> KopiaSnapshotIssueSample? {
+        guard line.contains("Error when processing") else {
+            return nil
+        }
+
+        let path = extractProcessingPath(from: line)
+        let relativePath = path.map(PathPatternMatcher.normalizedRelativePath)
+        let lower = line.lowercased()
+
+        if lower.contains("resource deadlock avoided"),
+           let relativePath,
+           isCloudMaterializationPath(relativePath) {
+            return KopiaSnapshotIssueSample(
+                category: KopiaIssueCategory.cloudPlaceholder,
+                path: relativePath,
+                detail: line
+            )
+        }
+
+        if let relativePath,
+           PathPatternMatcher.matchesAny(
+               Config.backupToleratedEphemeralIgnorePatterns,
+               relativePath: relativePath
+           ) {
+            return KopiaSnapshotIssueSample(
+                category: KopiaIssueCategory.toleratedSystemEphemeral,
+                path: relativePath,
+                detail: line
+            )
+        }
+
+        if let relativePath,
+           isActionableUserDataPath(relativePath) {
+            return KopiaSnapshotIssueSample(
+                category: KopiaIssueCategory.actionableUserData,
+                path: relativePath,
+                detail: line
+            )
+        }
+
+        return KopiaSnapshotIssueSample(
+            category: KopiaIssueCategory.unclassified,
+            path: relativePath,
+            detail: line
+        )
+    }
+
+    private static func extractProcessingPath(from line: String) -> String? {
+        guard let startRange = line.range(of: "Error when processing \"") else {
+            return nil
+        }
+        let remainder = line[startRange.upperBound...]
+        guard let endIndex = remainder.firstIndex(of: "\"") else {
+            return nil
+        }
+        return String(remainder[..<endIndex])
+    }
+
+    private static func isCloudMaterializationPath(_ relativePath: String) -> Bool {
+        Config.cloudMaterializationRoots.contains { root in
+            let relativeRoot = PathPatternMatcher.normalizedRelativePath(root)
+            return relativePath == relativeRoot || relativePath.hasPrefix(relativeRoot + "/")
+        }
+    }
+
+    private static func isActionableUserDataPath(_ relativePath: String) -> Bool {
+        if relativePath.hasPrefix("Desktop/")
+            || relativePath == "Desktop"
+            || relativePath.hasPrefix("Documents/")
+            || relativePath == "Documents"
+            || relativePath.hasPrefix("Downloads/")
+            || relativePath == "Downloads"
+            || relativePath.hasPrefix("Library/Mobile Documents/")
+            || relativePath == "Library/Mobile Documents"
+            || relativePath.hasPrefix("Library/Mail/")
+            || relativePath == "Library/Mail"
+            || relativePath.hasPrefix("Library/Messages/")
+            || relativePath == "Library/Messages"
+            || relativePath.hasPrefix("Library/Safari/")
+            || relativePath == "Library/Safari"
+            || relativePath.hasPrefix("Pictures/Photos Library.photoslibrary/")
+            || relativePath == "Pictures/Photos Library.photoslibrary"
+            || relativePath.hasPrefix("Library/Containers/net.whatsapp.WhatsApp/") {
+            return true
+        }
+
+        return false
+    }
+}
+
+struct KopiaOutputObservation {
+    var snapshotID: String?
+    var snapshotRoot: String?
+    var snapshotDuration: String?
+    var fatalErrorCount: Int?
+    var categoryCounts: [String: Int] = [:]
+    var samples: [KopiaSnapshotIssueSample] = []
+
+    mutating func observe(line: String) {
+        if let created = Self.parseCreatedSnapshotLine(line) {
+            snapshotRoot = created.root
+            snapshotID = created.id
+            snapshotDuration = created.duration
+            return
+        }
+
+        if let fatalCount = Self.parseFatalErrorCount(line) {
+            fatalErrorCount = fatalCount
+            return
+        }
+
+        guard let issue = KopiaFileIssueClassifier.classify(line: line) else {
+            return
+        }
+
+        categoryCounts[issue.category, default: 0] += 1
+        if samples.count < 12 {
+            samples.append(issue)
+        }
+    }
+
+    func finish(
+        status: Int32,
+        runID: String?,
+        pid: Int32?,
+        startedAt: Date?,
+        completedAt: Date
+    ) -> KopiaParsedRun {
+        var finalCounts = categoryCounts
+        var finalSamples = samples
+        let parsedIssueCount = categoryCounts.values.reduce(0, +)
+        let fatalCount = max(fatalErrorCount ?? parsedIssueCount, parsedIssueCount)
+        let missingNonZeroExitEvidence = status != 0 && snapshotID != nil && fatalCount == 0 && parsedIssueCount == 0
+        let unparsedFatalCount = missingNonZeroExitEvidence ? 1 : max(0, fatalCount - parsedIssueCount)
+
+        if unparsedFatalCount > 0 {
+            finalCounts[KopiaIssueCategory.unclassified, default: 0] += unparsedFatalCount
+            if finalSamples.count < 12 {
+                finalSamples.append(
+                    KopiaSnapshotIssueSample(
+                        category: KopiaIssueCategory.unclassified,
+                        path: nil,
+                        detail: missingNonZeroExitEvidence
+                            ? "Kopia exited with status \(status) after creating a snapshot, but COPYA found no per-file fatal evidence"
+                            : "Kopia reported \(fatalCount) fatal errors but COPYA parsed \(parsedIssueCount) file error lines"
+                    )
+                )
+            }
+        }
+
+        let toleratedCount =
+            (finalCounts[KopiaIssueCategory.cloudPlaceholder] ?? 0)
+            + (finalCounts[KopiaIssueCategory.toleratedSystemEphemeral] ?? 0)
+        let unclassifiedCount = finalCounts[KopiaIssueCategory.unclassified] ?? 0
+        let actionRequiredCount =
+            (finalCounts[KopiaIssueCategory.actionableUserData] ?? 0)
+            + unclassifiedCount
+
+        let result: String
+        if snapshotID == nil {
+            result = KopiaSnapshotResult.failed
+        } else if status == 0 && fatalCount == 0 {
+            result = KopiaSnapshotResult.clean
+        } else if actionRequiredCount > 0 {
+            result = KopiaSnapshotResult.partialActionRequired
+        } else {
+            result = KopiaSnapshotResult.partialTolerated
+        }
+
+        return KopiaParsedRun(
+            run_id: runID,
+            pid: pid,
+            started_at: startedAt.map(DateFormatters.iso.string(from:)),
+            completed_at: DateFormatters.iso.string(from: completedAt),
+            exit_status: status,
+            snapshot_id: snapshotID,
+            snapshot_root: snapshotRoot,
+            snapshot_duration: snapshotDuration,
+            snapshot_result: result,
+            fatal_error_count: fatalCount,
+            tolerated_count: toleratedCount,
+            action_required_count: actionRequiredCount,
+            unclassified_count: unclassifiedCount,
+            categorized_counts: finalCounts,
+            samples: finalSamples
+        )
+    }
+
+    static func parseCreatedSnapshotLine(_ line: String) -> (root: String, id: String, duration: String)? {
+        guard let rootRange = line.range(of: "Created snapshot with root ") else {
+            return nil
+        }
+        let afterRoot = line[rootRange.upperBound...]
+        guard let idRange = afterRoot.range(of: " and ID ") else {
+            return nil
+        }
+        let root = String(afterRoot[..<idRange.lowerBound])
+        let afterID = afterRoot[idRange.upperBound...]
+        guard let durationRange = afterID.range(of: " in ") else {
+            return nil
+        }
+        let id = String(afterID[..<durationRange.lowerBound])
+        let duration = String(afterID[durationRange.upperBound...])
+        return (root, id, duration)
+    }
+
+    static func parseFatalErrorCount(_ line: String) -> Int? {
+        guard line.hasPrefix("Found "),
+              let endRange = line.range(of: " fatal error") else {
+            return nil
+        }
+        let countText = line[line.index(line.startIndex, offsetBy: 6)..<endRange.lowerBound]
+        return Int(countText)
+    }
+}
+
+enum KopiaRunLogReplayer {
+    private struct ReplayRun {
+        var runID: String?
+        var pid: Int32?
+        var startedAt: Date?
+        var observation = KopiaOutputObservation()
+    }
+
+    static func latestCompletedRun(logFile: String = Config.rawKopiaLogFile) -> KopiaParsedRun? {
+        guard let text = tailText(path: logFile, bytes: 64 * 1024 * 1024) else {
+            if logFile != Config.logFile {
+                return latestCompletedRun(logFile: Config.logFile)
+            }
+            return nil
+        }
+        return latestCompletedRun(in: text)
+    }
+
+    static func latestCompletedRun(in text: String) -> KopiaParsedRun? {
+        var current: ReplayRun?
+        var latest: KopiaParsedRun?
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let (date, event) = stripLogPrefix(String(rawLine))
+            if event.contains("raw kopia output starting") || event.contains("kopia backup starting") {
+                let existingObservation = current?.observation ?? KopiaOutputObservation()
+                current = ReplayRun(
+                    runID: value(after: "run_id=", in: event) ?? current?.runID,
+                    pid: value(after: "pid=", in: event).flatMap(Int32.init) ?? current?.pid,
+                    startedAt: date ?? current?.startedAt,
+                    observation: existingObservation
+                )
+                continue
+            }
+
+            if current == nil && looksLikeKopiaOutput(event) {
+                current = ReplayRun()
+            }
+
+            guard var run = current else {
+                continue
+            }
+
+            if (event.hasPrefix("raw kopia output finished status=")
+                || event.hasPrefix("kopia backup exit observed status=")),
+               let status = value(after: "status=", in: event).flatMap(Int32.init) {
+                latest = run.observation.finish(
+                    status: status,
+                    runID: run.runID,
+                    pid: run.pid,
+                    startedAt: run.startedAt,
+                    completedAt: date ?? Date()
+                )
+                current = nil
+                continue
+            }
+
+            run.observation.observe(line: event)
+            current = run
+        }
+
+        return latest
+    }
+
+    private static func looksLikeKopiaOutput(_ line: String) -> Bool {
+        line.hasPrefix("Snapshotting ")
+            || line.hasPrefix("Error when processing ")
+            || line.hasPrefix("Created snapshot with root ")
+            || line.hasPrefix("Found ")
+    }
+
+    private static func tailText(path: String, bytes: UInt64) -> String? {
+        let url = URL(fileURLWithPath: path)
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let startOffset = endOffset > bytes ? endOffset - bytes : 0
+        try? handle.seek(toOffset: startOffset)
+        let data = handle.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func stripLogPrefix(_ line: String) -> (Date?, String) {
+        guard line.count > 25 else {
+            return (nil, line)
+        }
+        let prefix = String(line.prefix(24))
+        guard let date = DateFormatters.log.date(from: prefix) else {
+            return (nil, line)
+        }
+        let eventStart = line.index(line.startIndex, offsetBy: 25)
+        return (date, String(line[eventStart...]))
+    }
+
+    private static func value(after marker: String, in line: String) -> String? {
+        guard let range = line.range(of: marker) else {
+            return nil
+        }
+        let remainder = line[range.upperBound...]
+        let end = remainder.firstIndex(where: { $0 == " " || $0 == "\t" }) ?? remainder.endIndex
+        return String(remainder[..<end])
     }
 }
 
@@ -2106,6 +2683,7 @@ enum FileFlags {
     struct Snapshot {
         var flags: UInt32
         var size: Int64
+        var mode: mode_t
     }
 
     static func snapshot(for url: URL) -> Snapshot? {
@@ -2116,7 +2694,8 @@ enum FileFlags {
             }
             return Snapshot(
                 flags: statBuffer.st_flags,
-                size: Int64(statBuffer.st_size)
+                size: Int64(statBuffer.st_size),
+                mode: statBuffer.st_mode
             )
         }
     }
@@ -2131,6 +2710,10 @@ enum FileFlags {
         }
         return (flags & sfDataless) != 0
     }
+
+    static func isDataless(_ snapshot: Snapshot) -> Bool {
+        (snapshot.flags & sfDataless) != 0
+    }
 }
 
 final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -2142,6 +2725,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var lastStartAt: Date?
     @Published var lastSuccessAt: Date?
     @Published var lastSuccessCloudCoverage: String?
+    @Published var lastSnapshotAt: Date?
+    @Published var lastSnapshotID: String?
+    @Published var lastSnapshotRoot: String?
+    @Published var lastSnapshotDuration: String?
+    @Published var lastSnapshotResult: String?
+    @Published var lastSnapshotErrorCount: Int?
+    @Published var lastSnapshotToleratedCount: Int?
+    @Published var lastSnapshotActionRequiredCount: Int?
+    @Published var lastSnapshotUnclassifiedCount: Int?
+    @Published var lastSnapshotIssueCounts: [String: Int] = [:]
+    @Published var lastSnapshotIssueSamples: [KopiaSnapshotIssueSample] = []
     @Published var lastFailureAt: Date?
     @Published var lastFailure: String?
     @Published var lastFailureKind: String?
@@ -2182,6 +2776,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private var kopiaOutputBuffer = ""
     private var kopiaSuppressedDatalessReadErrors = 0
     private var kopiaOtherOutputReadErrors = 0
+    private var kopiaOutputObservation = KopiaOutputObservation()
     private var observedKopiaFailure: KopiaFailureClassification?
     private var activeMaterializationID: UUID?
     private var stopReason: String?
@@ -3025,6 +3620,15 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 return
             }
 
+            DispatchQueue.main.sync {
+                self.kopiaOutputBuffer = ""
+                self.kopiaSuppressedDatalessReadErrors = 0
+                self.kopiaOtherOutputReadErrors = 0
+                self.kopiaOutputObservation = KopiaOutputObservation()
+                self.observedKopiaFailure = nil
+                self.lastKopiaOutputAt = nil
+            }
+
             pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 guard !data.isEmpty else {
@@ -3053,6 +3657,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 return
             }
 
+            self.appendDataToFile(
+                "\(DateFormatters.log.string(from: Date())) raw kopia output starting run_id=\(runID) pid=\(process.processIdentifier)\n".data(using: .utf8) ?? Data(),
+                path: Config.rawKopiaLogFile
+            )
+
             var activeRecord = initialRecord
             activeRecord.child_pid = process.processIdentifier
             activeRecord.updated_at = DateFormatters.iso.string(from: Date())
@@ -3071,12 +3680,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.activeRunID = runID
                 self.activePIDOwner = "current"
                 self.externalKopiaPIDs = []
-                self.kopiaOutputBuffer = ""
-                self.kopiaSuppressedDatalessReadErrors = 0
-                self.kopiaOtherOutputReadErrors = 0
-                self.observedKopiaFailure = nil
                 self.livenessCheckAt = Date()
-                self.lastKopiaOutputAt = nil
                 self.internalKopiaActivity = InternalKopiaActivitySnapshot.unavailable(
                     reason: "waiting for per-PID Kopia logs",
                     activePID: process.processIdentifier,
@@ -3101,10 +3705,6 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
                 self.appendLog("kopia backup starting trigger=\(trigger) run_id=\(runID) pid=\(process.processIdentifier)")
                 self.appendLog("running: kopia snapshot create --no-progress \(Config.backupSource)")
-                self.appendDataToFile(
-                    "\(DateFormatters.log.string(from: Date())) raw kopia output starting run_id=\(runID) pid=\(process.processIdentifier)\n".data(using: .utf8) ?? Data(),
-                    path: Config.rawKopiaLogFile
-                )
                 self.writeStatus()
             }
         }
@@ -3216,9 +3816,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         let aborted = abortReason != nil && !timedOut
         let readFailures = totals.readFailures
         let datalessPlaceholders = totals.dataless
+        let downloadFailures = totals.downloadRequestFailures
+        let resolutionFailures = totals.placeholderResolutionFailures
         let completed = abortReason == nil && !timedOut
         let cloudCoverage: String
-        if completed && datalessPlaceholders == 0 && readFailures == 0 {
+        if completed && datalessPlaceholders == 0 && readFailures == 0 && downloadFailures == 0 && resolutionFailures == 0 {
             cloudCoverage = "complete"
         } else if completed {
             cloudCoverage = "partial"
@@ -3227,7 +3829,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         let reason: String?
-        if completed && datalessPlaceholders == 0 && readFailures == 0 {
+        if completed && datalessPlaceholders == 0 && readFailures == 0 && downloadFailures == 0 && resolutionFailures == 0 {
             reason = "completed"
         } else if completed {
             var parts: [String] = []
@@ -3236,6 +3838,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             }
             if readFailures > 0 {
                 parts.append("\(readFailures) read failures")
+            }
+            if downloadFailures > 0 {
+                parts.append("\(downloadFailures) download request failures")
+            }
+            if resolutionFailures > 0 {
+                parts.append("\(resolutionFailures) placeholder resolution failures")
             }
             reason = "completed with \(parts.joined(separator: ", "))"
         } else if let abortReason {
@@ -3261,6 +3869,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             total_failures: readFailures,
             total_dataless_placeholders: datalessPlaceholders,
             total_read_failures: readFailures,
+            total_dataless_entries: totals.datalessEntries,
+            total_resolved_dataless_placeholders: totals.resolvedDataless,
+            total_download_request_failures: totals.downloadRequestFailures,
+            total_placeholder_resolution_failures: totals.placeholderResolutionFailures,
             cloud_coverage: cloudCoverage,
             roots: roots
         )
@@ -3296,10 +3908,16 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         var filesRead = 0
         var failures = 0
         var datalessPlaceholders = 0
-        var datalessPaths = Set<String>()
+        var datalessRecords: [String: CloudPlaceholderRecord] = [:]
         var datalessSamplePaths: [String] = []
         var readFailures = 0
         var readFailureSamplePaths: [String] = []
+        var totalDatalessEntries = 0
+        var resolvedDatalessPlaceholders = 0
+        var downloadRequestFailures = 0
+        var placeholderResolutionFailures = 0
+        var datalessKindCounts: [String: Int] = [:]
+        var placeholderFailureSamplePaths: [String] = []
         var aborted = false
         var timedOut = false
         var lastError: String?
@@ -3307,6 +3925,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         var lastLogProgressAt = Date.distantPast
         var lastProgressUnits = 0
         let isICloudRoot = root.contains("/Library/Mobile Documents")
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isRegularFileKey, .isUbiquitousItemKey]
 
         func rememberSample(_ path: String, in samples: inout [String]) {
             if samples.count < 5 {
@@ -3319,6 +3938,42 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             failures = readFailures
             lastError = message
             rememberSample(samplePath ?? message, in: &readFailureSamplePaths)
+        }
+
+        func recordPlaceholderFailure(_ message: String, samplePath: String? = nil, downloadRequest: Bool = false) {
+            if downloadRequest {
+                downloadRequestFailures += 1
+            } else {
+                placeholderResolutionFailures += 1
+            }
+            lastError = message
+            rememberSample(samplePath ?? message, in: &placeholderFailureSamplePaths)
+        }
+
+        func rememberDatalessPlaceholder(_ placeholder: CloudPlaceholderRecord, url: URL) {
+            guard datalessRecords[placeholder.path] == nil else {
+                return
+            }
+
+            var record = placeholder
+            datalessRecords[placeholder.path] = record
+            datalessPlaceholders += 1
+            totalDatalessEntries += 1
+            datalessKindCounts[placeholder.kind.rawValue, default: 0] += 1
+            rememberSample(placeholder.path, in: &datalessSamplePaths)
+
+            guard record.isICloudActionable else {
+                return
+            }
+
+            do {
+                try FileManager.default.startDownloadingUbiquitousItem(at: url)
+            } catch {
+                let message = "\(url.path): unable to request iCloud download: \(error.localizedDescription)"
+                record.downloadRequestError = message
+                datalessRecords[placeholder.path] = record
+                recordPlaceholderFailure(message, samplePath: url.path, downloadRequest: true)
+            }
         }
 
         func currentResult() -> CloudMaterializationRootResult {
@@ -3335,7 +3990,13 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 timed_out: timedOut,
                 last_error: lastError,
                 dataless_sample_paths: datalessSamplePaths,
-                read_failure_sample_paths: readFailureSamplePaths
+                read_failure_sample_paths: readFailureSamplePaths,
+                total_dataless_entries: totalDatalessEntries,
+                resolved_dataless_placeholders: resolvedDatalessPlaceholders,
+                download_request_failures: downloadRequestFailures,
+                placeholder_resolution_failures: placeholderResolutionFailures,
+                dataless_kind_counts: datalessKindCounts,
+                placeholder_failure_sample_paths: placeholderFailureSamplePaths
             )
         }
 
@@ -3356,6 +4017,76 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 lastLogProgressAt = now
             }
             progress(phase, currentResult(), shouldLog)
+        }
+
+        func refreshDatalessSamplePaths() {
+            datalessSamplePaths = Array(datalessRecords.keys.sorted().prefix(5))
+        }
+
+        func markPlaceholderResolved(_ path: String) {
+            datalessRecords.removeValue(forKey: path)
+            datalessPlaceholders = max(0, datalessPlaceholders - 1)
+            resolvedDatalessPlaceholders += 1
+        }
+
+        func finishRoot() -> CloudMaterializationRootResult {
+            if isICloudRoot, !datalessRecords.isEmpty, Date() < deadline, !aborted, !timedOut {
+                publishProgress("waiting for iCloud downloads", forceLog: true)
+                let waitSeconds = min(10.0, max(0.0, deadline.timeIntervalSinceNow))
+                if waitSeconds > 0 {
+                    Thread.sleep(forTimeInterval: waitSeconds)
+                }
+
+                publishProgress("rescanning placeholders", forceLog: true)
+                for path in datalessRecords.keys.sorted() {
+                    if Date() >= deadline {
+                        timedOut = true
+                        lastError = "cloud materialization timed out while rescanning placeholders in \(root)"
+                        break
+                    }
+
+                    if let reason = materializationAbortReason(for: id) {
+                        aborted = true
+                        lastError = reason
+                        break
+                    }
+
+                    let url = URL(fileURLWithPath: path)
+                    guard let statSnapshot = FileFlags.snapshot(for: url) else {
+                        recordPlaceholderFailure("\(path): unable to stat placeholder during rescan", samplePath: path)
+                        publishProgress("rescanning placeholders")
+                        continue
+                    }
+
+                    guard !FileFlags.isDataless(statSnapshot) else {
+                        publishProgress("rescanning placeholders")
+                        continue
+                    }
+
+                    let values = try? url.resourceValues(forKeys: Set(keys))
+                    let resolvedKind = CloudPlaceholderClassifier.kind(values: values, url: url)
+                    if resolvedKind == .file {
+                        do {
+                            let handle = try FileHandle(forReadingFrom: url)
+                            _ = try handle.read(upToCount: 1)
+                            try? handle.close()
+                            filesRead += 1
+                            markPlaceholderResolved(path)
+                        } catch {
+                            recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
+                        }
+                    } else {
+                        markPlaceholderResolved(path)
+                    }
+                    publishProgress("rescanning placeholders")
+                }
+
+                refreshDatalessSamplePaths()
+            }
+
+            let result = currentResult()
+            progress(timedOut ? "timed out" : (aborted ? "aborted" : "root complete"), result, true)
+            return result
         }
 
         progress("root starting", currentResult(), true)
@@ -3392,32 +4123,46 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         publishProgress("reading files", forceLog: true)
 
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isUbiquitousItemKey]
+        var shouldEnumerateRoot = true
+        let rootValues = try? rootURL.resourceValues(forKeys: Set(keys))
+        if let rootPlaceholder = CloudPlaceholderClassifier.record(
+            for: rootURL,
+            root: root,
+            values: rootValues,
+            statSnapshot: FileFlags.snapshot(for: rootURL)
+        ) {
+            rememberDatalessPlaceholder(rootPlaceholder, url: rootURL)
+            if rootPlaceholder.kind == .directory || rootPlaceholder.kind == .package {
+                publishProgress("classifying placeholders", forceLog: true)
+                shouldEnumerateRoot = false
+            }
+        }
+
+        guard shouldEnumerateRoot else {
+            return finishRoot()
+        }
+
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: keys,
             options: [],
             errorHandler: { url, error in
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                if let placeholder = CloudPlaceholderClassifier.record(
+                    for: url,
+                    root: root,
+                    values: values,
+                    statSnapshot: FileFlags.snapshot(for: url)
+                ) {
+                    rememberDatalessPlaceholder(placeholder, url: url)
+                    return true
+                }
                 recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
                 return true
             }
         ) else {
             recordReadFailure("unable to enumerate \(root)", samplePath: root)
-            let result = CloudMaterializationRootResult(
-                root: root,
-                exists: true,
-                directories_seen: directoriesSeen,
-                files_seen: filesSeen,
-                files_read: filesRead,
-                dataless_placeholders: datalessPlaceholders,
-                read_failures: readFailures,
-                failures: failures,
-                aborted: false,
-                timed_out: false,
-                last_error: lastError,
-                dataless_sample_paths: datalessSamplePaths,
-                read_failure_sample_paths: readFailureSamplePaths
-            )
+            let result = currentResult()
             progress("enumeration failed", result, true)
             return result
         }
@@ -3437,6 +4182,23 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
             do {
                 let values = try url.resourceValues(forKeys: Set(keys))
+                if let placeholder = CloudPlaceholderClassifier.record(
+                    for: url,
+                    root: root,
+                    values: values,
+                    statSnapshot: FileFlags.snapshot(for: url)
+                ) {
+                    if placeholder.kind == .directory || placeholder.kind == .package {
+                        directoriesSeen += 1
+                        enumerator.skipDescendants()
+                    } else if placeholder.kind == .file {
+                        filesSeen += 1
+                    }
+                    rememberDatalessPlaceholder(placeholder, url: url)
+                    publishProgress("classifying placeholders")
+                    continue
+                }
+
                 if values.isDirectory == true {
                     directoriesSeen += 1
                     publishProgress("reading files")
@@ -3449,21 +4211,6 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
 
                 filesSeen += 1
-                if FileFlags.isDataless(url) {
-                    datalessPlaceholders += 1
-                    datalessPaths.insert(url.path)
-                    rememberSample(url.path, in: &datalessSamplePaths)
-                    if isICloudRoot || values.isUbiquitousItem == true {
-                        do {
-                            try FileManager.default.startDownloadingUbiquitousItem(at: url)
-                        } catch {
-                            lastError = "\(url.path): unable to request iCloud download: \(error.localizedDescription)"
-                        }
-                    }
-                    publishProgress("classifying placeholders")
-                    continue
-                }
-
                 let handle = try FileHandle(forReadingFrom: url)
                 _ = try handle.read(upToCount: 1)
                 try? handle.close()
@@ -3474,52 +4221,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             publishProgress("reading files")
         }
 
-        if isICloudRoot, !datalessPaths.isEmpty, Date() < deadline, !aborted, !timedOut {
-            publishProgress("waiting for iCloud downloads", forceLog: true)
-            let waitSeconds = min(10.0, max(0.0, deadline.timeIntervalSinceNow))
-            if waitSeconds > 0 {
-                Thread.sleep(forTimeInterval: waitSeconds)
-            }
-
-            publishProgress("rescanning placeholders", forceLog: true)
-            for path in Array(datalessPaths).sorted() {
-                if Date() >= deadline {
-                    timedOut = true
-                    lastError = "cloud materialization timed out while rescanning placeholders in \(root)"
-                    break
-                }
-
-                if let reason = materializationAbortReason(for: id) {
-                    aborted = true
-                    lastError = reason
-                    break
-                }
-
-                let url = URL(fileURLWithPath: path)
-                guard !FileFlags.isDataless(url) else {
-                    publishProgress("rescanning placeholders")
-                    continue
-                }
-
-                do {
-                    let handle = try FileHandle(forReadingFrom: url)
-                    _ = try handle.read(upToCount: 1)
-                    try? handle.close()
-                    filesRead += 1
-                    datalessPaths.remove(path)
-                    datalessPlaceholders -= 1
-                } catch {
-                    recordReadFailure("\(url.path): \(error.localizedDescription)", samplePath: url.path)
-                }
-                publishProgress("rescanning placeholders")
-            }
-
-            datalessSamplePaths = Array(datalessPaths.sorted().prefix(5))
-        }
-
-        let result = currentResult()
-        progress(timedOut ? "timed out" : (aborted ? "aborted" : "root complete"), result, true)
-        return result
+        return finishRoot()
     }
 
     private func publishCloudMaterializationProgress(
@@ -3546,6 +4248,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             total_failures: totals.failures,
             total_dataless_placeholders: totals.dataless,
             total_read_failures: totals.readFailures,
+            total_dataless_entries: totals.datalessEntries,
+            total_resolved_dataless_placeholders: totals.resolvedDataless,
+            total_download_request_failures: totals.downloadRequestFailures,
+            total_placeholder_resolution_failures: totals.placeholderResolutionFailures,
             cloud_coverage: "running",
             roots: roots
         )
@@ -3568,6 +4274,18 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         result: CloudMaterializationRootResult
     ) -> String {
         var message = "cloud materialization progress phase=\(phase) root=\"\(result.root)\" directories_seen=\(result.directories_seen) files_seen=\(result.files_seen) files_read=\(result.files_read) dataless_placeholders=\(result.dataless_placeholders) read_failures=\(result.read_failures)"
+        if let totalDatalessEntries = result.total_dataless_entries, totalDatalessEntries > 0 {
+            message += " dataless_entries=\(totalDatalessEntries)"
+        }
+        if let resolved = result.resolved_dataless_placeholders, resolved > 0 {
+            message += " resolved_dataless=\(resolved)"
+        }
+        if let downloadFailures = result.download_request_failures, downloadFailures > 0 {
+            message += " download_request_failures=\(downloadFailures)"
+        }
+        if let resolutionFailures = result.placeholder_resolution_failures, resolutionFailures > 0 {
+            message += " placeholder_resolution_failures=\(resolutionFailures)"
+        }
         if let lastError = result.last_error, !lastError.isEmpty {
             message += " last_error=\"\(lastError)\""
         }
@@ -3629,6 +4347,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             total_failures: 0,
             total_dataless_placeholders: 0,
             total_read_failures: 0,
+            total_dataless_entries: 0,
+            total_resolved_dataless_placeholders: 0,
+            total_download_request_failures: 0,
+            total_placeholder_resolution_failures: 0,
             cloud_coverage: "blocked",
             roots: []
         )
@@ -3636,15 +4358,41 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
     private func materializationTotals(
         roots: [CloudMaterializationRootResult]
-    ) -> (directories: Int, filesSeen: Int, filesRead: Int, failures: Int, dataless: Int, readFailures: Int) {
-        roots.reduce((directories: 0, filesSeen: 0, filesRead: 0, failures: 0, dataless: 0, readFailures: 0)) { partial, root in
+    ) -> (
+        directories: Int,
+        filesSeen: Int,
+        filesRead: Int,
+        failures: Int,
+        dataless: Int,
+        readFailures: Int,
+        datalessEntries: Int,
+        resolvedDataless: Int,
+        downloadRequestFailures: Int,
+        placeholderResolutionFailures: Int
+    ) {
+        roots.reduce((
+            directories: 0,
+            filesSeen: 0,
+            filesRead: 0,
+            failures: 0,
+            dataless: 0,
+            readFailures: 0,
+            datalessEntries: 0,
+            resolvedDataless: 0,
+            downloadRequestFailures: 0,
+            placeholderResolutionFailures: 0
+        )) { partial, root in
             (
                 directories: partial.directories + root.directories_seen,
                 filesSeen: partial.filesSeen + root.files_seen,
                 filesRead: partial.filesRead + root.files_read,
                 failures: partial.failures + root.failures,
                 dataless: partial.dataless + root.dataless_placeholders,
-                readFailures: partial.readFailures + root.read_failures
+                readFailures: partial.readFailures + root.read_failures,
+                datalessEntries: partial.datalessEntries + (root.total_dataless_entries ?? root.dataless_placeholders),
+                resolvedDataless: partial.resolvedDataless + (root.resolved_dataless_placeholders ?? 0),
+                downloadRequestFailures: partial.downloadRequestFailures + (root.download_request_failures ?? 0),
+                placeholderResolutionFailures: partial.placeholderResolutionFailures + (root.placeholder_resolution_failures ?? 0)
             )
         }
     }
@@ -3856,6 +4604,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "Cloud Download Blocked"
         case .cloudPartial:
             return "Cloud Partial"
+        case .backupPartial:
+            if lastSnapshotResult == KopiaSnapshotResult.partialActionRequired {
+                return "Backup Partial, Needs Attention"
+            }
+            return "Backup Partial"
         case .failed:
             return "Failed"
         case .disabled:
@@ -3879,6 +4632,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "pause.circle"
         case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .cloudDownloadBlocked, .failed:
             return "exclamationmark.triangle"
+        case .backupPartial:
+            if lastSnapshotResult == KopiaSnapshotResult.partialActionRequired {
+                return "exclamationmark.triangle"
+            }
+            return "checkmark.circle"
         case .cloudPartial:
             return "icloud.slash"
         case .disabled:
@@ -3922,6 +4680,42 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "never"
         }
         return DateFormatters.menu.string(from: lastSuccessAt)
+    }
+
+    var lastSnapshotText: String? {
+        guard let lastSnapshotAt else {
+            return nil
+        }
+        let result = lastSnapshotResult ?? "unknown"
+        let time = DateFormatters.menu.string(from: lastSnapshotAt)
+        if result == KopiaSnapshotResult.clean {
+            return "\(time) (clean)"
+        }
+        let issueCount = lastSnapshotErrorCount ?? 0
+        if result == KopiaSnapshotResult.partialActionRequired {
+            return "\(time) (partial, \(issueCount) issues need attention)"
+        }
+        if result == KopiaSnapshotResult.partialTolerated {
+            return "\(time) (partial, \(issueCount) tolerated issues)"
+        }
+        return "\(time) (\(result))"
+    }
+
+    var lastSnapshotIssueText: String? {
+        guard lastSnapshotResult == KopiaSnapshotResult.partialActionRequired else {
+            return nil
+        }
+        if let sample = lastSnapshotIssueSamples.first {
+            if let path = sample.path {
+                return "\(sample.category): \(path)"
+            }
+            return sample.detail
+        }
+        let actionCount = lastSnapshotActionRequiredCount ?? 0
+        guard actionCount > 0 else {
+            return nil
+        }
+        return "\(actionCount) action-required file read issues"
     }
 
     var activePIDText: String {
@@ -4037,9 +4831,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         if activeMaterializationID != nil {
             let phase = cloudMaterialization.current_phase ?? "running"
             let datalessPlaceholders = cloudMaterialization.total_dataless_placeholders ?? 0
+            let datalessEntries = cloudMaterialization.total_dataless_entries ?? datalessPlaceholders
             if let root = cloudMaterialization.current_root {
                 let rootName = URL(fileURLWithPath: root).lastPathComponent
-                return "\(rootName): \(phase), \(cloudMaterialization.total_files_read)/\(cloudMaterialization.total_files_seen) files, \(datalessPlaceholders) placeholders"
+                return "\(rootName): \(phase), \(cloudMaterialization.total_files_read)/\(cloudMaterialization.total_files_seen) files, \(datalessPlaceholders)/\(datalessEntries) unresolved placeholders"
             }
             return phase
         }
@@ -4051,8 +4846,24 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         if cloudMaterialization.completed {
             let datalessPlaceholders = cloudMaterialization.total_dataless_placeholders ?? 0
             let readFailures = cloudMaterialization.total_read_failures ?? cloudMaterialization.total_failures
-            if datalessPlaceholders > 0 || readFailures > 0 {
-                return "partial: \(datalessPlaceholders) placeholders, \(readFailures) read failures"
+            let datalessEntries = cloudMaterialization.total_dataless_entries ?? datalessPlaceholders
+            let downloadFailures = cloudMaterialization.total_download_request_failures ?? 0
+            let resolutionFailures = cloudMaterialization.total_placeholder_resolution_failures ?? 0
+            if datalessPlaceholders > 0 || readFailures > 0 || downloadFailures > 0 || resolutionFailures > 0 {
+                var parts = [
+                    "\(datalessPlaceholders)/\(datalessEntries) unresolved placeholders",
+                    "\(readFailures) read failures",
+                ]
+                if downloadFailures > 0 {
+                    parts.append("\(downloadFailures) download request failures")
+                }
+                if resolutionFailures > 0 {
+                    parts.append("\(resolutionFailures) placeholder resolution failures")
+                }
+                if let sample = firstCloudMaterializationSample {
+                    parts.append("sample: \(URL(fileURLWithPath: sample).lastPathComponent)")
+                }
+                return "partial: \(parts.joined(separator: ", "))"
             }
             return "complete: \(cloudMaterialization.total_files_read) files checked"
         }
@@ -4062,6 +4873,21 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         return "not run"
+    }
+
+    var firstCloudMaterializationSample: String? {
+        for root in cloudMaterialization.roots {
+            if let sample = root.read_failure_sample_paths.first {
+                return sample
+            }
+            if let sample = root.placeholder_failure_sample_paths.first {
+                return sample
+            }
+            if let sample = root.dataless_sample_paths.first {
+                return sample
+            }
+        }
+        return nil
     }
 
     private func durationText(since start: Date?, now: Date) -> String {
@@ -4230,7 +5056,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         let now = Date()
 
         if network.allowed {
-            if lastSuccessAt == nil && (becameAllowed || reason == "startup") {
+            if lastSuccessAt == nil && lastSnapshotAt == nil && (becameAllowed || reason == "startup") {
                 if let nextRunAt,
                    now < nextRunAt,
                    lastFailureAt != nil {
@@ -4261,6 +5087,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         appendLog("kopia backup exit observed status=\(status)")
         activePipe?.fileHandleForReading.readabilityHandler = nil
         flushKopiaOutputSummary()
+        let now = Date()
+        let parsedRun = kopiaOutputObservation.finish(
+            status: status,
+            runID: activeRunID,
+            pid: activePID,
+            startedAt: lastStartAt,
+            completedAt: now
+        )
         appendDataToFile(
             "\(DateFormatters.log.string(from: Date())) raw kopia output finished status=\(status)\n".data(using: .utf8) ?? Data(),
             path: Config.rawKopiaLogFile
@@ -4273,9 +5107,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         internalKopiaActivity = .inactive()
         lastKopiaActivityHeartbeatLogAt = nil
         lastKopiaActivityHeartbeatSummary = nil
+        kopiaOutputObservation = KopiaOutputObservation()
         removeActiveRunRecord()
 
-        let now = Date()
         if let reason = stopReason {
             lastAbortReason = reason
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
@@ -4301,7 +5135,15 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             fullDiskAccessBlocked = false
             cloudDownloadBlocked = false
             nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            recordSnapshotResult(parsedRun, completedAt: now)
             appendLog("success: kopia snapshot complete")
+        } else if parsedRun.snapshot_id != nil,
+                  parsedRun.snapshot_result == KopiaSnapshotResult.partialTolerated
+                    || parsedRun.snapshot_result == KopiaSnapshotResult.partialActionRequired {
+            recordSnapshotResult(parsedRun, completedAt: now)
+            nextRunAt = now.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+            let attention = parsedRun.snapshot_result == KopiaSnapshotResult.partialActionRequired ? " action_required=\(parsedRun.action_required_count)" : ""
+            appendLog("partial: kopia snapshot created id=\(parsedRun.snapshot_id ?? "unknown") result=\(parsedRun.snapshot_result) fatal_errors=\(parsedRun.fatal_error_count)\(attention)")
         } else {
             let classification = observedKopiaFailure ?? KopiaFailureClassifier.generic(status: status)
             recordFailure(
@@ -4314,6 +5156,38 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         appendLog("kopia backup finished")
         refreshNetwork(reason: "backup-exit", shouldEvaluateSchedule: false)
+    }
+
+    private func recordSnapshotResult(_ parsedRun: KopiaParsedRun, completedAt: Date) {
+        lastSnapshotAt = completedAt
+        lastSnapshotID = parsedRun.snapshot_id
+        lastSnapshotRoot = parsedRun.snapshot_root
+        lastSnapshotDuration = parsedRun.snapshot_duration
+        lastSnapshotResult = parsedRun.snapshot_result
+        lastSnapshotErrorCount = parsedRun.fatal_error_count
+        lastSnapshotToleratedCount = parsedRun.tolerated_count
+        lastSnapshotActionRequiredCount = parsedRun.action_required_count
+        lastSnapshotUnclassifiedCount = parsedRun.unclassified_count
+        lastSnapshotIssueCounts = parsedRun.categorized_counts
+        lastSnapshotIssueSamples = parsedRun.samples
+        if parsedRun.snapshot_result == KopiaSnapshotResult.clean {
+            lastSnapshotIssueCounts = [:]
+            lastSnapshotIssueSamples = []
+            lastSnapshotErrorCount = 0
+            lastSnapshotToleratedCount = 0
+            lastSnapshotActionRequiredCount = 0
+            lastSnapshotUnclassifiedCount = 0
+        }
+        if parsedRun.snapshot_result == KopiaSnapshotResult.partialTolerated
+            || parsedRun.snapshot_result == KopiaSnapshotResult.partialActionRequired {
+            lastFailureAt = nil
+            lastFailure = nil
+            lastFailureKind = nil
+            lastFailureDetail = nil
+            lastAbortReason = nil
+            fullDiskAccessBlocked = false
+            cloudDownloadBlocked = false
+        }
     }
 
     private func handleRecoveredBackupExit() {
@@ -4484,6 +5358,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         case "allowed":
             if lastFailureAt != nil {
                 state = .failed
+            } else if lastSnapshotResult == KopiaSnapshotResult.partialTolerated
+                        || lastSnapshotResult == KopiaSnapshotResult.partialActionRequired {
+                state = .backupPartial
             } else if lastSuccessCloudCoverage == "partial" {
                 state = .cloudPartial
             } else {
@@ -4501,7 +5378,13 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     private func inferredCloudCoverage(_ snapshot: CloudMaterializationSnapshot) -> String {
         let datalessPlaceholders = snapshot.total_dataless_placeholders ?? 0
         let readFailures = snapshot.total_read_failures ?? snapshot.total_failures
-        if snapshot.completed && datalessPlaceholders == 0 && readFailures == 0 {
+        let downloadFailures = snapshot.total_download_request_failures ?? 0
+        let resolutionFailures = snapshot.total_placeholder_resolution_failures ?? 0
+        if snapshot.completed
+            && datalessPlaceholders == 0
+            && readFailures == 0
+            && downloadFailures == 0
+            && resolutionFailures == 0 {
             return "complete"
         }
         if snapshot.completed {
@@ -4516,6 +5399,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             lastStartAt = parseDate(status.last_start_at)
             lastSuccessAt = parseDate(status.last_success_at)
             lastSuccessCloudCoverage = status.last_success_cloud_coverage
+            lastSnapshotAt = parseDate(status.last_snapshot_at)
+            lastSnapshotID = status.last_snapshot_id
+            lastSnapshotRoot = status.last_snapshot_root
+            lastSnapshotDuration = status.last_snapshot_duration
+            lastSnapshotResult = status.last_snapshot_result
+            lastSnapshotErrorCount = status.last_snapshot_error_count
+            lastSnapshotToleratedCount = status.last_snapshot_tolerated_count
+            lastSnapshotActionRequiredCount = status.last_snapshot_action_required_count
+            lastSnapshotUnclassifiedCount = status.last_snapshot_unclassified_count
+            lastSnapshotIssueCounts = status.last_snapshot_issue_counts ?? [:]
+            lastSnapshotIssueSamples = status.last_snapshot_issue_samples ?? []
             lastFailureAt = parseDate(status.last_failure_at)
             lastFailure = status.last_failure
             lastFailureKind = status.last_failure_kind
@@ -4539,6 +5433,26 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 nextRunAt = nil
             }
         }
+        reconcileFailedSnapshotFromLogIfNeeded()
+    }
+
+    private func reconcileFailedSnapshotFromLogIfNeeded() {
+        guard lastFailureKind == "file_read_failure",
+              lastSnapshotID == nil,
+              readActiveRunRecord() == nil,
+              let parsedRun = KopiaRunLogReplayer.latestCompletedRun(),
+              parsedRun.snapshot_id != nil,
+              parsedRun.snapshot_result == KopiaSnapshotResult.partialTolerated
+                || parsedRun.snapshot_result == KopiaSnapshotResult.partialActionRequired else {
+            return
+        }
+
+        let completedAt = parseDate(parsedRun.completed_at) ?? Date()
+        recordSnapshotResult(parsedRun, completedAt: completedAt)
+        nextRunAt = completedAt.addingTimeInterval(TimeInterval(Config.runIntervalSeconds))
+        appendLog("reconciled failed Kopia status from latest snapshot id=\(parsedRun.snapshot_id ?? "unknown") result=\(parsedRun.snapshot_result)")
+        updateDerivedState()
+        writeStatus()
     }
 
     private func seedLastSuccessFromLogIfNeededThenReconcile() {
@@ -4622,6 +5536,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
+            backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
             cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -4674,6 +5589,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             last_start_at: dateString(lastStartAt),
             last_success_at: dateString(lastSuccessAt),
             last_success_cloud_coverage: lastSuccessCloudCoverage,
+            last_snapshot_at: dateString(lastSnapshotAt),
+            last_snapshot_id: lastSnapshotID,
+            last_snapshot_root: lastSnapshotRoot,
+            last_snapshot_duration: lastSnapshotDuration,
+            last_snapshot_result: lastSnapshotResult,
+            last_snapshot_error_count: lastSnapshotErrorCount,
+            last_snapshot_tolerated_count: lastSnapshotToleratedCount,
+            last_snapshot_action_required_count: lastSnapshotActionRequiredCount,
+            last_snapshot_unclassified_count: lastSnapshotUnclassifiedCount,
+            last_snapshot_issue_counts: lastSnapshotIssueCounts,
+            last_snapshot_issue_samples: lastSnapshotIssueSamples,
             backup_elapsed_seconds: activePID == nil ? nil : Int(livenessCheckAt.timeIntervalSince(lastStartAt ?? livenessCheckAt)),
             last_liveness_check_at: activePID == nil && activeMaterializationID == nil && activeOperationID == nil && externalKopiaPIDs.isEmpty ? nil : dateString(livenessCheckAt),
             last_kopia_output_at: dateString(lastKopiaOutputAt),
@@ -4783,12 +5709,14 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if isKnownDatalessKopiaReadError(trimmed) {
             kopiaSuppressedDatalessReadErrors += 1
+            kopiaOutputObservation.observe(line: trimmed)
             if kopiaSuppressedDatalessReadErrors == 1 || kopiaSuppressedDatalessReadErrors % 500 == 0 {
                 appendLog("kopia dataless placeholder read errors suppressed count=\(kopiaSuppressedDatalessReadErrors) raw_log=\"\(Config.rawKopiaLogFile)\"")
             }
             return
         }
 
+        kopiaOutputObservation.observe(line: trimmed)
         if trimmed.contains("Error when processing") {
             kopiaOtherOutputReadErrors += 1
         }
@@ -4800,9 +5728,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func isKnownDatalessKopiaReadError(_ line: String) -> Bool {
-        line.contains("Error when processing")
-            && line.contains("resource deadlock avoided")
-            && line.contains(": read ")
+        KopiaFileIssueClassifier.classify(line: line)?.category == KopiaIssueCategory.cloudPlaceholder
     }
 }
 
@@ -4967,6 +5893,17 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             last_start_at: nil,
             last_success_at: nil,
             last_success_cloud_coverage: nil,
+            last_snapshot_at: nil,
+            last_snapshot_id: nil,
+            last_snapshot_root: nil,
+            last_snapshot_duration: nil,
+            last_snapshot_result: nil,
+            last_snapshot_error_count: nil,
+            last_snapshot_tolerated_count: nil,
+            last_snapshot_action_required_count: nil,
+            last_snapshot_unclassified_count: nil,
+            last_snapshot_issue_counts: nil,
+            last_snapshot_issue_samples: nil,
             backup_elapsed_seconds: nil,
             last_liveness_check_at: nil,
             last_kopia_output_at: nil,
@@ -4975,6 +5912,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
             kopia_suppressed_dataless_read_errors: nil,
             kopia_other_output_read_errors: nil,
             disk_health: DiskHealthSnapshot.unknown(),
+            cloud_capacity_estimate: CloudCapacityEstimate.unknown(),
             last_failure_at: nil,
             last_failure_kind: nil,
             last_failure_detail: nil,
@@ -4988,6 +5926,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 backup_source: Config.backupSource,
                 backup_ignore_file: Config.backupIgnoreFile,
                 backup_ignore_patterns: Config.backupIgnorePatterns,
+                backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
                 protected_data_probe_paths: Config.protectedDataProbePaths,
                 cloud_materialization_roots: Config.cloudMaterializationRoots,
                 cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -5086,18 +6025,30 @@ func printStatusJSONAndExit() -> Never {
         active_run_id: nil,
         active_pid_owner: nil,
         external_kopia_pids: [],
-        last_start_at: nil,
-        last_success_at: nil,
-        last_success_cloud_coverage: nil,
-        backup_elapsed_seconds: nil,
+            last_start_at: nil,
+            last_success_at: nil,
+            last_success_cloud_coverage: nil,
+            last_snapshot_at: nil,
+            last_snapshot_id: nil,
+            last_snapshot_root: nil,
+            last_snapshot_duration: nil,
+            last_snapshot_result: nil,
+            last_snapshot_error_count: nil,
+            last_snapshot_tolerated_count: nil,
+            last_snapshot_action_required_count: nil,
+            last_snapshot_unclassified_count: nil,
+            last_snapshot_issue_counts: nil,
+            last_snapshot_issue_samples: nil,
+            backup_elapsed_seconds: nil,
         last_liveness_check_at: nil,
         last_kopia_output_at: nil,
         kopia_output_idle_seconds: nil,
         kopia_activity: nil,
         kopia_suppressed_dataless_read_errors: nil,
         kopia_other_output_read_errors: nil,
-        disk_health: DiskHealthSnapshot.unknown(),
-        last_failure_at: nil,
+            disk_health: DiskHealthSnapshot.unknown(),
+            cloud_capacity_estimate: CloudCapacityEstimate.unknown(),
+            last_failure_at: nil,
         last_failure_kind: nil,
         last_failure_detail: nil,
         last_failure: nil,
@@ -5110,6 +6061,7 @@ func printStatusJSONAndExit() -> Never {
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
+            backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
             cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -5143,6 +6095,24 @@ func printStatusJSONAndExit() -> Never {
     exit(0)
 }
 
+func printLatestKopiaClassificationAndExit() -> Never {
+    guard let latest = KopiaRunLogReplayer.latestCompletedRun() else {
+        fputs("unable to find a complete COPYA-owned Kopia run in \(Config.rawKopiaLogFile)\n", stderr)
+        exit(1)
+    }
+    printEncodedJSON(latest)
+    exit(0)
+}
+
+func printKopiaClassificationAndExit(logFile: String) -> Never {
+    guard let latest = KopiaRunLogReplayer.latestCompletedRun(logFile: logFile) else {
+        fputs("unable to find a complete COPYA-owned Kopia run in \(logFile)\n", stderr)
+        exit(1)
+    }
+    printEncodedJSON(latest)
+    exit(0)
+}
+
 func runCLI(requestPermission: Bool = false, printStatusJSON: Bool = false) -> Never {
     let app = NSApplication.shared
     let delegate = CLIAppDelegate(requestPermission: requestPermission, printStatusJSON: printStatusJSON)
@@ -5162,10 +6132,18 @@ func runCLIIfNeeded() {
         runCLI()
     case "--status-json":
         printStatusJSONAndExit()
+    case "--classify-last-kopia-errors":
+        printLatestKopiaClassificationAndExit()
+    case "--classify-kopia-log":
+        guard arguments.count == 2 else {
+            fputs("usage: \(Config.appName) --classify-kopia-log <path>\n", stderr)
+            exit(64)
+        }
+        printKopiaClassificationAndExit(logFile: String(arguments.dropFirst().first ?? ""))
     case "--request-location":
         runCLI(requestPermission: true)
     default:
-        fputs("usage: \(Config.appName) [--network-json] [--status-json] [--request-location]\n", stderr)
+        fputs("usage: \(Config.appName) [--network-json] [--status-json] [--classify-last-kopia-errors] [--classify-kopia-log <path>] [--request-location]\n", stderr)
         exit(64)
     }
 }
@@ -5193,6 +6171,9 @@ struct KopiaBackupMonitorApp: App {
             }
             Divider()
             Text("Last success: \(monitor.lastSuccessText)")
+            if let lastSnapshot = monitor.lastSnapshotText {
+                Text("Last snapshot: \(lastSnapshot)")
+            }
             Text("Next run: \(monitor.nextRunText)")
             Text("Active PID: \(monitor.activePIDText)")
             if let operation = monitor.activeOperationText {
@@ -5217,6 +6198,10 @@ struct KopiaBackupMonitorApp: App {
             if let failure = monitor.lastFailure {
                 Divider()
                 Text("Last failure: \(failure)")
+            }
+            if let snapshotIssue = monitor.lastSnapshotIssueText {
+                Divider()
+                Text("Snapshot issue: \(snapshotIssue)")
             }
             if let abort = monitor.lastAbortReason {
                 Text("Last abort: \(abort)")

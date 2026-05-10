@@ -20,6 +20,7 @@ home = data("home")
 backup_source = data("backup_source")
 backup_ignore_file = data("backup_ignore_file")
 backup_ignore_patterns = data("backup_ignore_patterns")
+backup_tolerated_ephemeral_ignore_patterns = data("backup_tolerated_ephemeral_ignore_patterns")
 protected_data_probe_paths = data("protected_data_probe_paths")
 cloud_materialization_roots = data("cloud_materialization_roots")
 cloud_materialization_enabled = bool_data("cloud_materialization_enabled")
@@ -101,6 +102,7 @@ template_context = {
     "active_run_file": active_run_file,
     "backup_ignore_file": backup_ignore_file,
     "backup_ignore_patterns": backup_ignore_patterns,
+    "backup_tolerated_ephemeral_ignore_patterns": backup_tolerated_ephemeral_ignore_patterns,
     "backup_source": backup_source,
     "cloud_materialization_enabled": cloud_materialization_enabled,
     "cloud_materialization_requires_allowed_network": cloud_materialization_requires_allowed_network,
