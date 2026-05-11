@@ -1,0 +1,13 @@
+group_data/all.py
+
+.venv/
+__pycache__/
+*.py[cod]
+
+*.log
+*.app/
+.pyinfra/
+
+status.json
+active-run.json
+kopia-raw.log

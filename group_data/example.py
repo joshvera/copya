@@ -1,8 +1,8 @@
-user = "vera"
-home = "/Users/vera"
+user = "example"
+home = f"/Users/{user}"
 
-backup_source = "/Users/vera"
-backup_ignore_file = "/Users/vera/.kopiaignore"
+backup_source = home
+backup_ignore_file = f"{home}/.kopiaignore"
 backup_ignore_patterns = []
 backup_tolerated_ephemeral_ignore_patterns = [
     {
@@ -40,21 +40,21 @@ backup_tolerated_ephemeral_ignore_patterns = [
 ]
 
 protected_data_probe_paths = [
-    "/Users/vera/Desktop",
-    "/Users/vera/Documents",
-    "/Users/vera/Library/Mobile Documents",
-    "/Users/vera/Library/Mobile Documents/com~apple~CloudDocs",
-    "/Users/vera/Library/Mail",
-    "/Users/vera/Library/Messages",
-    "/Users/vera/Library/Safari",
-    "/Users/vera/Pictures/Photos Library.photoslibrary",
+    f"{home}/Desktop",
+    f"{home}/Documents",
+    f"{home}/Library/Mobile Documents",
+    f"{home}/Library/Mobile Documents/com~apple~CloudDocs",
+    f"{home}/Library/Mail",
+    f"{home}/Library/Messages",
+    f"{home}/Library/Safari",
+    f"{home}/Pictures/Photos Library.photoslibrary",
 ]
 
 cloud_materialization_roots = [
-    "/Users/vera/Desktop",
-    "/Users/vera/Documents",
-    "/Users/vera/Library/Mobile Documents",
-    "/Users/vera/Library/CloudStorage",
+    f"{home}/Desktop",
+    f"{home}/Documents",
+    f"{home}/Library/Mobile Documents",
+    f"{home}/Library/CloudStorage",
 ]
 cloud_materialization_enabled = True
 cloud_materialization_requires_allowed_network = True
@@ -62,25 +62,25 @@ cloud_materialization_timeout_seconds = 3600
 cloud_materialization_retry_seconds = 900
 
 deny_ssids = [
-    "Freeside",
-    "cerise",
+    "ExampleMeteredWiFi",
+    "ExamplePhoneHotspot",
 ]
 
-legacy_backup_launchd_label = "com.vera.kopia.backup"
-monitor_launchd_label = "com.vera.kopia.monitor"
+legacy_backup_launchd_label = "dev.example.copya.backup"
+monitor_launchd_label = "dev.example.copya.monitor"
 run_interval_seconds = 21600
 network_check_interval_seconds = 60
 preflight_failure_retry_seconds = 300
 
-runner_dir = "/Users/vera/.local/kopia-backup"
-log_file = "/Users/vera/Library/Logs/kopia-backup.log"
-raw_kopia_log_file = "/Users/vera/.local/kopia-backup/kopia-raw.log"
-status_file = "/Users/vera/.local/kopia-backup/status.json"
-active_run_file = "/Users/vera/.local/kopia-backup/active-run.json"
+runner_dir = f"{home}/.local/kopia-backup"
+log_file = f"{home}/Library/Logs/kopia-backup.log"
+raw_kopia_log_file = f"{runner_dir}/kopia-raw.log"
+status_file = f"{runner_dir}/status.json"
+active_run_file = f"{runner_dir}/active-run.json"
 internal_kopia_activity_probe_enabled = True
 internal_kopia_log_dirs = [
-    "/Users/vera/Library/Logs/kopia/cli-logs",
-    "/Users/vera/Library/Logs/kopia/content-logs",
+    f"{home}/Library/Logs/kopia/cli-logs",
+    f"{home}/Library/Logs/kopia/content-logs",
 ]
 internal_kopia_log_mtime_tolerance_seconds = 10
 internal_kopia_log_tail_bytes = 131072
@@ -90,23 +90,29 @@ minimum_execution_reserve_bytes = 53687091200
 critical_runtime_free_space_bytes = 21474836480
 unknown_icloud_placeholder_estimate_bytes = 268435456
 disk_free_space_check_paths = [
-    "/Users/vera/Library/Caches/kopia",
-    "/Users/vera/Library/Logs/kopia",
-    "/Users/vera/.local/kopia-backup/kopia-raw.log",
-    "/Users/vera",
+    f"{home}/Library/Caches/kopia",
+    f"{home}/Library/Logs/kopia",
+    raw_kopia_log_file,
+    home,
 ]
 allow_deploy_restart_while_backup_running = False
-onepassword_read_timeout_seconds = 60
 
 app_name = "COPYA"
 app_install_dir = "/Applications"
 app_executable_name = "kopia-backup-monitor"
-app_bundle_identifier = "com.vera.kopia.monitor"
+app_bundle_identifier = "dev.example.copya.monitor"
 legacy_monitor_app_names = [
     "Kopia Backup Monitor",
 ]
-app_signing_identity = "Apple Development: Joshua Vera (HBBYKPXNDM)"
+
+# "-" means ad-hoc signing. Set an Apple Development or Developer ID identity
+# in local group_data/all.py when you want a stable Team ID signature.
+app_signing_identity = "-"
 
 onepassword_cli_package = "1password-cli"
-kopia_password_ref = "op://Private/Kopia/password"
+password_source = "environment"
+password_env_var = "KOPIA_PASSWORD"
+password_command = []
+password_read_timeout_seconds = 60
+kopia_password_ref = ""
 use_sudo = False

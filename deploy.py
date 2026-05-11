@@ -1,7 +1,13 @@
 from pyinfra import host
 from pyinfra.operations import brew, files, server
 
-from group_data import all as defaults
+try:
+    from group_data import all as defaults
+except ImportError as exc:
+    raise SystemExit(
+        "Missing local config: copy group_data/example.py to "
+        "group_data/all.py and edit it for this Mac before running deploy.py."
+    ) from exc
 
 
 def data(name):
@@ -56,7 +62,10 @@ app_bundle_identifier = data("app_bundle_identifier")
 legacy_monitor_app_names = data("legacy_monitor_app_names")
 app_signing_identity = data("app_signing_identity")
 onepassword_cli_package = data("onepassword_cli_package")
-onepassword_read_timeout_seconds = data("onepassword_read_timeout_seconds")
+password_source = data("password_source")
+password_env_var = data("password_env_var")
+password_command = data("password_command")
+password_read_timeout_seconds = data("password_read_timeout_seconds")
 kopia_password_ref = data("kopia_password_ref")
 use_sudo = bool_data("use_sudo")
 
@@ -115,7 +124,10 @@ template_context = {
     "log_file": log_file,
     "monitor_launchd_label": monitor_launchd_label,
     "network_check_interval_seconds": network_check_interval_seconds,
-    "onepassword_read_timeout_seconds": onepassword_read_timeout_seconds,
+    "password_source": password_source,
+    "password_env_var": password_env_var,
+    "password_command": password_command,
+    "password_read_timeout_seconds": password_read_timeout_seconds,
     "preflight_failure_retry_seconds": preflight_failure_retry_seconds,
     "raw_kopia_log_file": raw_kopia_log_file,
     "protected_data_probe_paths": protected_data_probe_paths,
@@ -156,9 +168,11 @@ server.shell(
             'to manage files there." >&2; exit 1)'
         ),
         (
+            f'if test "{app_signing_identity}" != "-"; then '
             f'security find-identity -v -p codesigning | grep -F "{app_signing_identity}" '
             f'>/dev/null || (echo "Signing identity not found: {app_signing_identity}" '
-            '>&2; exit 1)'
+            '>&2; exit 1); '
+            "fi"
         ),
         (
             f'test -w "{app_install_dir}" || '
@@ -169,8 +183,16 @@ server.shell(
 )
 
 brew.packages(
-    name="Install Kopia and 1Password CLI",
-    packages=["kopia", onepassword_cli_package],
+    name=(
+        "Install Kopia and 1Password CLI"
+        if password_source == "onepassword"
+        else "Install Kopia"
+    ),
+    packages=(
+        ["kopia", onepassword_cli_package]
+        if password_source == "onepassword"
+        else ["kopia"]
+    ),
 )
 
 if not allow_deploy_restart_while_backup_running:

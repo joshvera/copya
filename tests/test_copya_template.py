@@ -7,7 +7,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from group_data import all as data
+from group_data import example as data
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,6 +169,59 @@ class CopyaTemplateTest(unittest.TestCase):
         self.assertIn("activePIDOwner == \"recovered\"", source)
         self.assertIn("recordFailure(reason, kind: failureKind, detail: detail)", source)
 
+    def test_public_example_config_is_generic(self) -> None:
+        tracked_public_text = "\n".join(
+            path.read_text(errors="ignore")
+            for path in [
+                ROOT / "group_data" / "example.py",
+                ROOT / "README.md",
+                ROOT / "CONTRIBUTING.md",
+                ROOT / "SECURITY.md",
+            ]
+        )
+
+        for forbidden in [
+            "/Users/" + "vera",
+            "Joshua " + "Vera",
+            "HBBYK" + "PXNDM",
+            "com." + "vera",
+            "op://" + "Private",
+            "Free" + "side",
+            "cer" + "ise",
+        ]:
+            self.assertNotIn(forbidden, tracked_public_text)
+
+        self.assertEqual(data.password_source, "environment")
+        self.assertEqual(data.kopia_password_ref, "")
+        self.assertEqual(data.app_signing_identity, "-")
+
+    def test_secret_unavailable_state_and_password_sources_are_rendered(self) -> None:
+        source = render_monitor_source(
+            {
+                "password_source": "command",
+                "password_env_var": "COPYA_TEST_PASSWORD",
+                "password_command": ["/usr/bin/security", "find-generic-password"],
+                "password_read_timeout_seconds": 12,
+            }
+        )
+
+        self.assertIn('static let passwordSource = "command"', source)
+        self.assertIn('static let passwordEnvVar = "COPYA_TEST_PASSWORD"', source)
+        self.assertIn('"/usr/bin/security"', source)
+        self.assertIn("static let passwordReadTimeoutSeconds = 12", source)
+        self.assertIn('case needsSecret = "needs_secret"', source)
+        self.assertIn("recordSecretUnavailable", source)
+        self.assertIn('"secret_unavailable"', source)
+        self.assertIn("Needs 1Password Unlock", source)
+        self.assertIn("Secret Unavailable", source)
+        self.assertIn("password_command failed", source)
+        self.assertIn('detail: "exit status \\(result.status)"', source)
+        self.assertIn('detail: "process launch failed"', source)
+        self.assertIn("Configured password source returned an empty Kopia password", source)
+        self.assertIn('Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty', source)
+        command_branch = source.split('case "command":', 1)[1].split("default:", 1)[0]
+        self.assertNotIn("sanitizedCommandError(result.stderr)", command_branch)
+
     def test_cloud_capacity_estimate_uses_fallbacks_without_blocking_unknowns(self) -> None:
         source = render_monitor_source()
 
@@ -317,15 +370,15 @@ class CopyaTemplateTest(unittest.TestCase):
                 "\n".join(
                     [
                         "2026-05-10T13:00:00-0300 raw kopia output starting run_id=RUN1 pid=123",
-                        "Snapshotting vera@wintermute:/Users/vera ...",
+                        "Snapshotting example@mac:/Users/example ...",
                         (
                             'Error when processing "Library/Mobile Documents/iCloud~com~apple~clips/'
-                            'Documents/example.clipsproject": fdopendir /Users/vera/Library/Mobile '
+                            'Documents/example.clipsproject": fdopendir /Users/example/Library/Mobile '
                             "Documents/iCloud~com~apple~clips/Documents/example.clipsproject: "
                             "resource deadlock avoided"
                         ),
                         "Created snapshot with root root123 and ID snap123 in 1s",
-                        "Found 1 fatal error(s) while snapshotting vera@wintermute:/Users/vera.",
+                        "Found 1 fatal error(s) while snapshotting example@mac:/Users/example.",
                         "2026-05-10T13:00:02-0300 raw kopia output finished status=1",
                         "",
                     ]
@@ -358,13 +411,13 @@ class CopyaTemplateTest(unittest.TestCase):
                     [
                         (
                             'Error when processing "Library/Mobile Documents/iCloud~com~apple~clips/'
-                            'Documents/early.clipsproject": fdopendir /Users/vera/Library/Mobile '
+                            'Documents/early.clipsproject": fdopendir /Users/example/Library/Mobile '
                             "Documents/iCloud~com~apple~clips/Documents/early.clipsproject: "
                             "resource deadlock avoided"
                         ),
                         "2026-05-10T13:00:00-0300 raw kopia output starting run_id=RUN-LATE pid=789",
                         "Created snapshot with root root789 and ID snap789 in 1s",
-                        "Found 1 fatal error(s) while snapshotting vera@wintermute:/Users/vera.",
+                        "Found 1 fatal error(s) while snapshotting example@mac:/Users/example.",
                         "2026-05-10T13:00:02-0300 raw kopia output finished status=1",
                         "",
                     ]
@@ -397,17 +450,17 @@ class CopyaTemplateTest(unittest.TestCase):
                         (
                             'Error when processing "Library/Mobile Documents/com~apple~CloudDocs/'
                             'NOTARY DOCS/file.jpeg": unable to open file: unable to open local file: '
-                            "open /Users/vera/Library/Mobile Documents/com~apple~CloudDocs/NOTARY "
+                            "open /Users/example/Library/Mobile Documents/com~apple~CloudDocs/NOTARY "
                             "DOCS/file.jpeg: operation not permitted"
                         ),
                         (
                             'Error when processing "Library/Metadata/CoreSpotlight/example.journal": '
                             "unable to open file: unable to open local file: open "
-                            "/Users/vera/Library/Metadata/CoreSpotlight/example.journal: "
+                            "/Users/example/Library/Metadata/CoreSpotlight/example.journal: "
                             "operation not permitted"
                         ),
                         "Created snapshot with root root456 and ID snap456 in 3s",
-                        "Found 2 fatal error(s) while snapshotting vera@wintermute:/Users/vera.",
+                        "Found 2 fatal error(s) while snapshotting example@mac:/Users/example.",
                         "2026-05-10T13:00:03-0300 raw kopia output finished status=1",
                         "",
                     ]
@@ -563,6 +616,31 @@ class CopyaTemplateTest(unittest.TestCase):
         self.assertIn("Active matching Kopia backup detected", deploy)
         self.assertIn("allow_deploy_restart_while_backup_running=True", deploy)
 
+    def test_restore_smoke_is_bounded_and_cleans_up(self) -> None:
+        script = (ROOT / "scripts" / "restore-smoke.sh").read_text()
+
+        self.assertIn("trap cleanup EXIT", script)
+        self.assertIn('mktemp -d "$tmp_parent/copya-restore-smoke.XXXXXX"', script)
+        self.assertIn('"$work_dir" == "$tmp_parent"/copya-restore-smoke.*', script)
+        self.assertIn("--shallow=0", script)
+        self.assertIn("--shallow-minsize=0", script)
+        self.assertIn("COPYA_RESTORE_SMOKE_MAX_BYTES", script)
+        self.assertNotIn("COPYA_RESTORE_SMOKE_DIR", script)
+        self.assertIn("kopia list -l", script)
+        self.assertIn('snapshot_mode="${snapshot_entry%%', script)
+        self.assertIn('if [[ "$snapshot_mode" != -* ]]', script)
+        self.assertIn("restore path must not contain empty, dot, or dot-dot segments", script)
+        self.assertIn("restore path is too large for smoke test", script)
+        self.assertIn('kopia snapshot restore "$snapshot_root/$restore_path" "$work_dir/target/$restore_path"', script)
+        self.assertIn("live_sha256=", script)
+        self.assertIn("restored_sha256=", script)
+        self.assertIn('if [[ "$live_hash" != "$restored_hash" ]]', script)
+        self.assertIn("snapshot_id=", script)
+        self.assertIn("snapshot_root=", script)
+        self.assertIn("restore_path=", script)
+        self.assertIn("snapshot_size=", script)
+        self.assertIn("restore path must be a specific file", script)
+
     def test_deploy_passes_disk_health_config_to_templates(self) -> None:
         deploy = (ROOT / "deploy.py").read_text()
 
@@ -574,6 +652,10 @@ class CopyaTemplateTest(unittest.TestCase):
             "unknown_icloud_placeholder_estimate_bytes",
             "disk_free_space_check_paths",
             "backup_tolerated_ephemeral_ignore_patterns",
+            "password_source",
+            "password_env_var",
+            "password_command",
+            "password_read_timeout_seconds",
         ]:
             self.assertIn(f'{name} = data("{name}")', deploy)
             self.assertIn(f'"{name}": {name}', deploy)

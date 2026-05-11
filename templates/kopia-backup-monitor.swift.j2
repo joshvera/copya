@@ -59,11 +59,18 @@ enum Config {
         "{{ path }}",
 {% endfor %}
     ]
+    static let passwordSource = "{{ password_source }}"
+    static let passwordEnvVar = "{{ password_env_var }}"
+    static let passwordCommand: [String] = [
+{% for part in password_command %}
+        "{{ part }}",
+{% endfor %}
+    ]
+    static let passwordReadTimeoutSeconds = {{ password_read_timeout_seconds }}
     static let kopiaPasswordRef = "{{ kopia_password_ref }}"
     static let runIntervalSeconds = {{ run_interval_seconds }}
     static let networkCheckIntervalSeconds = {{ network_check_interval_seconds }}
     static let preflightFailureRetrySeconds = {{ preflight_failure_retry_seconds }}
-    static let onePasswordReadTimeoutSeconds = {{ onepassword_read_timeout_seconds }}
     static let denySSIDs = Set<String>([
 {% for ssid in deny_ssids %}
         "{{ ssid }}",
@@ -113,6 +120,9 @@ struct ConfigSummary: Codable {
     var network_check_interval_seconds: Int
     var preflight_failure_retry_seconds: Int
     var deny_ssids: [String]
+    var password_source: String
+    var password_env_var: String
+    var password_command_configured: Bool
     var password_ref_configured: Bool
     var app_bundle_identifier: String
     var monitor_launchd_label: String
@@ -149,6 +159,9 @@ extension ConfigSummary {
         case network_check_interval_seconds
         case preflight_failure_retry_seconds
         case deny_ssids
+        case password_source
+        case password_env_var
+        case password_command_configured
         case password_ref_configured
         case app_bundle_identifier
         case monitor_launchd_label
@@ -185,7 +198,10 @@ extension ConfigSummary {
         network_check_interval_seconds = try container.decodeIfPresent(Int.self, forKey: .network_check_interval_seconds) ?? Config.networkCheckIntervalSeconds
         preflight_failure_retry_seconds = try container.decodeIfPresent(Int.self, forKey: .preflight_failure_retry_seconds) ?? Config.preflightFailureRetrySeconds
         deny_ssids = try container.decodeIfPresent([String].self, forKey: .deny_ssids) ?? Array(Config.denySSIDs).sorted()
-        password_ref_configured = try container.decodeIfPresent(Bool.self, forKey: .password_ref_configured) ?? !Config.kopiaPasswordRef.isEmpty
+        password_source = try container.decodeIfPresent(String.self, forKey: .password_source) ?? Config.passwordSource
+        password_env_var = try container.decodeIfPresent(String.self, forKey: .password_env_var) ?? Config.passwordEnvVar
+        password_command_configured = try container.decodeIfPresent(Bool.self, forKey: .password_command_configured) ?? !Config.passwordCommand.isEmpty
+        password_ref_configured = try container.decodeIfPresent(Bool.self, forKey: .password_ref_configured) ?? (Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty)
         app_bundle_identifier = try container.decodeIfPresent(String.self, forKey: .app_bundle_identifier) ?? Config.bundleIdentifier
         monitor_launchd_label = try container.decodeIfPresent(String.self, forKey: .monitor_launchd_label) ?? Config.monitorLaunchdLabel
         log_file = try container.decodeIfPresent(String.self, forKey: .log_file) ?? Config.logFile
@@ -765,6 +781,7 @@ enum BackupState: String {
     case needsPermission = "needs_permission"
     case needsFullDiskAccess = "needs_full_disk_access"
     case needsDiskSpace = "needs_disk_space"
+    case needsSecret = "needs_secret"
     case cloudDownloadBlocked = "cloud_download_blocked"
     case cloudPartial = "cloud_partial"
     case backupPartial = "backup_partial"
@@ -3168,7 +3185,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 return
             }
 
-            let opPath = CommandRunner.findExecutable("op")
+            let opPath = Config.passwordSource == "onepassword"
+                ? CommandRunner.findExecutable("op")
+                : nil
             let kopiaPath = CommandRunner.findExecutable("kopia")
             let scan = ProcessInspector.scanKopiaSnapshots()
             let activeRunRecord = self.readActiveRunRecord()
@@ -3200,8 +3219,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     return
                 }
 
-                guard let opPath else {
-                    self.recordPreflightFailure("1Password CLI 'op' is not installed or not on PATH", operationID: operationID)
+                if Config.passwordSource == "onepassword" && opPath == nil {
+                    self.recordSecretUnavailable("1Password CLI 'op' is not installed or not on PATH", operationID: operationID)
                     return
                 }
 
@@ -3216,7 +3235,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
-    private func startPreflightAndMaterialization(trigger: String, opPath: String, kopiaPath: String) {
+    private func startPreflightAndMaterialization(trigger: String, opPath: String?, kopiaPath: String) {
         let materializationID = UUID()
         activeMaterializationID = materializationID
         clearMaterializationCancellation(materializationID)
@@ -3422,7 +3441,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         probeResults: [ProtectedDataProbeResult],
         snapshot: CloudMaterializationSnapshot,
         trigger: String,
-        opPath: String,
+        opPath: String?,
         kopiaPath: String
     ) {
         guard activeMaterializationID == id else {
@@ -3465,7 +3484,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
     private func startKopiaLaunch(
         trigger: String,
-        opPath: String,
+        opPath: String?,
         kopiaPath: String,
         ranAfterMaterialization: Bool
     ) {
@@ -3489,10 +3508,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         let operationID = activeOperationID ?? UUID()
         if activeOperationID == nil {
-            beginOperation(id: operationID, name: "starting_backup", detail: "reading 1Password password")
+            beginOperation(id: operationID, name: "starting_backup", detail: "reading Kopia password")
         } else {
             activeOperation = "starting_backup"
-            activeOperationDetail = "reading 1Password password"
+            activeOperationDetail = "reading Kopia password"
             updateDerivedState()
             writeStatus()
         }
@@ -3503,19 +3522,30 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             }
 
             let password: String
-            do {
+            switch Config.passwordSource {
+            case "onepassword":
+                guard let opPath else {
+                    DispatchQueue.main.async {
+                        guard self.activeOperationID == operationID else {
+                            return
+                        }
+                        self.recordSecretUnavailable("1Password CLI 'op' is not installed or not on PATH", operationID: operationID)
+                    }
+                    return
+                }
+                do {
                 let result = try CommandRunner.run(
                     opPath,
                     arguments: ["read", Config.kopiaPasswordRef],
                     environment: self.childEnvironment(),
-                    timeoutSeconds: Config.onePasswordReadTimeoutSeconds
+                    timeoutSeconds: Config.passwordReadTimeoutSeconds
                 )
                 if result.timedOut {
                     DispatchQueue.main.async {
                         guard self.activeOperationID == operationID else {
                             return
                         }
-                        self.recordPreflightFailure("Timed out reading Kopia password from 1Password", operationID: operationID)
+                        self.recordSecretUnavailable("Timed out reading Kopia password from 1Password", operationID: operationID)
                     }
                     return
                 }
@@ -3526,9 +3556,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                             return
                         }
                         if detail.isEmpty {
-                            self.recordPreflightFailure("Unable to read Kopia password from 1Password reference", operationID: operationID)
+                            self.recordSecretUnavailable("Unable to read Kopia password from 1Password reference", operationID: operationID)
                         } else {
-                            self.recordPreflightFailure("Unable to read Kopia password from 1Password reference: \(detail)", operationID: operationID)
+                            self.recordSecretUnavailable("Unable to read Kopia password from 1Password reference", detail: detail, operationID: operationID)
                             self.appendLog("op read failed: \(detail)")
                         }
                     }
@@ -3540,7 +3570,71 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     guard self.activeOperationID == operationID else {
                         return
                     }
-                    self.recordPreflightFailure("Unable to run 1Password CLI: \(error.localizedDescription)", operationID: operationID)
+                    self.recordSecretUnavailable("Unable to run 1Password CLI", detail: error.localizedDescription, operationID: operationID)
+                }
+                return
+            }
+            case "environment":
+                password = self.childEnvironment()[Config.passwordEnvVar] ?? ""
+            case "command":
+                guard let executable = Config.passwordCommand.first else {
+                    DispatchQueue.main.async {
+                        guard self.activeOperationID == operationID else {
+                            return
+                        }
+                        self.recordSecretUnavailable("password_source is command but password_command is empty", operationID: operationID)
+                    }
+                    return
+                }
+                do {
+                    let result = try CommandRunner.run(
+                        executable,
+                        arguments: Array(Config.passwordCommand.dropFirst()),
+                        environment: self.childEnvironment(),
+                        timeoutSeconds: Config.passwordReadTimeoutSeconds
+                    )
+                    if result.timedOut {
+                        DispatchQueue.main.async {
+                            guard self.activeOperationID == operationID else {
+                                return
+                            }
+                            self.recordSecretUnavailable("Timed out reading Kopia password from password_command", operationID: operationID)
+                        }
+                        return
+                    }
+                    guard result.status == 0 else {
+                        DispatchQueue.main.async {
+                            guard self.activeOperationID == operationID else {
+                                return
+                            }
+                            self.recordSecretUnavailable(
+                                "password_command failed",
+                                detail: "exit status \(result.status)",
+                                operationID: operationID
+                            )
+                        }
+                        return
+                    }
+                    password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                } catch {
+                    DispatchQueue.main.async {
+                        guard self.activeOperationID == operationID else {
+                            return
+                        }
+                        self.recordSecretUnavailable(
+                            "Unable to run password_command",
+                            detail: "process launch failed",
+                            operationID: operationID
+                        )
+                    }
+                    return
+                }
+            default:
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordSecretUnavailable("Unsupported password_source '\(Config.passwordSource)'", operationID: operationID)
                 }
                 return
             }
@@ -3550,7 +3644,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     guard self.activeOperationID == operationID else {
                         return
                     }
-                    self.recordPreflightFailure("1Password returned an empty Kopia password", operationID: operationID)
+                    self.recordSecretUnavailable("Configured password source returned an empty Kopia password", operationID: operationID)
                 }
                 return
             }
@@ -4600,6 +4694,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "Needs Full Disk Access"
         case .needsDiskSpace:
             return "Needs Disk Space"
+        case .needsSecret:
+            return Config.passwordSource == "onepassword" ? "Needs 1Password Unlock" : "Secret Unavailable"
         case .cloudDownloadBlocked:
             return "Cloud Download Blocked"
         case .cloudPartial:
@@ -4630,7 +4726,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "person.crop.circle.badge.exclamationmark"
         case .paused:
             return "pause.circle"
-        case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .cloudDownloadBlocked, .failed:
+        case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .needsSecret, .cloudDownloadBlocked, .failed:
             return "exclamationmark.triangle"
         case .backupPartial:
             if lastSnapshotResult == KopiaSnapshotResult.partialActionRequired {
@@ -5250,6 +5346,25 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         writeStatus()
     }
 
+    private func recordSecretUnavailable(
+        _ message: String,
+        detail: String? = nil,
+        operationID: UUID? = nil
+    ) {
+        clearOperation(id: operationID)
+        lastFailureAt = Date()
+        lastFailure = message
+        lastFailureKind = "secret_unavailable"
+        lastFailureDetail = detail ?? message
+        fullDiskAccessBlocked = false
+        cloudDownloadBlocked = false
+        nextRunAt = Date().addingTimeInterval(TimeInterval(Config.preflightFailureRetrySeconds))
+        let detailText = detail.map { " detail=\"\($0)\"" } ?? ""
+        appendLog("secret unavailable: \(message)\(detailText); retrying preflight at \(DateFormatters.iso.string(from: nextRunAt!))")
+        updateDerivedState()
+        writeStatus()
+    }
+
     private func readActiveRunRecord() -> ActiveRunRecord? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: Config.activeRunFile)) else {
             return nil
@@ -5351,6 +5466,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         if lastFailureKind == "disk_space_exhausted" && (!diskHealth.ok || !cloudCapacityEstimate.ok) {
             state = .needsDiskSpace
+            return
+        }
+
+        if lastFailureKind == "secret_unavailable" {
+            state = .needsSecret
             return
         }
 
@@ -5547,7 +5667,10 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
             preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
             deny_ssids: Array(Config.denySSIDs).sorted(),
-            password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+            password_source: Config.passwordSource,
+            password_env_var: Config.passwordEnvVar,
+            password_command_configured: !Config.passwordCommand.isEmpty,
+            password_ref_configured: Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty,
             app_bundle_identifier: Config.bundleIdentifier,
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
@@ -5937,7 +6060,10 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 network_check_interval_seconds: Config.networkCheckIntervalSeconds,
                 preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
                 deny_ssids: Array(Config.denySSIDs).sorted(),
-                password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+                password_source: Config.passwordSource,
+                password_env_var: Config.passwordEnvVar,
+                password_command_configured: !Config.passwordCommand.isEmpty,
+                password_ref_configured: Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty,
                 app_bundle_identifier: Config.bundleIdentifier,
                 monitor_launchd_label: Config.monitorLaunchdLabel,
                 log_file: Config.logFile,
@@ -6072,7 +6198,10 @@ func printStatusJSONAndExit() -> Never {
             network_check_interval_seconds: Config.networkCheckIntervalSeconds,
             preflight_failure_retry_seconds: Config.preflightFailureRetrySeconds,
             deny_ssids: Array(Config.denySSIDs).sorted(),
-            password_ref_configured: !Config.kopiaPasswordRef.isEmpty,
+            password_source: Config.passwordSource,
+            password_env_var: Config.passwordEnvVar,
+            password_command_configured: !Config.passwordCommand.isEmpty,
+            password_ref_configured: Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty,
             app_bundle_identifier: Config.bundleIdentifier,
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
