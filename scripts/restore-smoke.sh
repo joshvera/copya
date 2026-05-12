@@ -24,7 +24,8 @@ for part in "${path_parts[@]}"; do
   fi
 done
 
-copya_bin="${COPYA_BIN:-/Applications/COPYA.app/Contents/MacOS/kopia-backup-monitor}"
+copya_bin="${COPYA_BIN:-/Applications/COPYA.app/Contents/MacOS/COPYA}"
+kopia_bin="${KOPIA_BIN:-/Applications/COPYA.app/Contents/Resources/bin/kopia}"
 max_bytes="${COPYA_RESTORE_SMOKE_MAX_BYTES:-52428800}"
 tmp_parent="${TMPDIR:-/tmp}"
 tmp_parent="${tmp_parent%/}"
@@ -37,10 +38,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ ! -x "$copya_bin" ]]; then
+  printf 'COPYA executable is not available: %s\n' "$copya_bin" >&2
+  exit 1
+fi
+if [[ ! -x "$kopia_bin" ]]; then
+  printf 'bundled Kopia executable is not available: %s\n' "$kopia_bin" >&2
+  exit 1
+fi
+
 status_json="$("$copya_bin" --status-json)"
 snapshot_id="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("last_snapshot_id") or "")')"
 snapshot_root="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("last_snapshot_root") or "")')"
 backup_source="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("config_summary", {}).get("backup_source") or "")')"
+kopia_home="${COPYA_KOPIA_HOME:-}"
+if [[ -z "$kopia_home" ]]; then
+  kopia_home="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("config_summary", {}).get("kopia_home") or "")')"
+fi
+kopia_config_file="${COPYA_KOPIA_CONFIG_FILE:-}"
+if [[ -z "$kopia_config_file" ]]; then
+  kopia_config_file="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("config_summary", {}).get("kopia_config_file") or "")')"
+fi
+kopia_cmd=("$kopia_bin")
+if [[ -n "$kopia_config_file" ]]; then
+  kopia_cmd+=(--config-file "$kopia_config_file")
+fi
+kopia_env=(KOPIA_CHECK_FOR_UPDATES=false)
+if [[ -n "$kopia_home" ]]; then
+  kopia_env+=(HOME="$kopia_home")
+fi
 
 if [[ -z "$snapshot_id" || -z "$snapshot_root" ]]; then
   printf 'COPYA status does not include a restorable last snapshot\n' >&2
@@ -49,6 +75,9 @@ fi
 if [[ -z "$backup_source" ]]; then
   printf 'COPYA status does not include backup_source\n' >&2
   exit 1
+fi
+if [[ -n "$kopia_home" ]]; then
+  mkdir -p "$kopia_home"
 fi
 
 live_path="$backup_source/$restore_path"
@@ -66,7 +95,7 @@ else
 fi
 
 snapshot_entry="$(
-  kopia list -l "$parent_object" | python3 -c '
+  env "${kopia_env[@]}" "${kopia_cmd[@]}" list -l "$parent_object" | python3 -c '
 import sys
 
 entry_name = sys.argv[1]
@@ -109,8 +138,10 @@ printf 'snapshot_root=%s\n' "$snapshot_root"
 printf 'restore_path=%s\n' "$restore_path"
 printf 'snapshot_size=%s\n' "$snapshot_size"
 
-kopia snapshot restore --shallow=0 --shallow-minsize=0 "$snapshot_root" "$work_dir/shallow"
-kopia snapshot restore "$snapshot_root/$restore_path" "$work_dir/target/$restore_path"
+env "${kopia_env[@]}" \
+  "${kopia_cmd[@]}" snapshot restore --shallow=0 --shallow-minsize=0 "$snapshot_root" "$work_dir/shallow"
+env "${kopia_env[@]}" \
+  "${kopia_cmd[@]}" snapshot restore "$snapshot_root/$restore_path" "$work_dir/target/$restore_path"
 
 restored_path="$work_dir/target/$restore_path"
 live_hash="$(shasum -a 256 "$live_path" | awk '{print $1}')"

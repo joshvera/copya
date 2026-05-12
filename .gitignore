@@ -1,11 +1,13 @@
 group_data/all.py
 
 .venv/
+.build/
 __pycache__/
 *.py[cod]
 
 *.log
 *.app/
+*.dmg
 .pyinfra/
 
 status.json

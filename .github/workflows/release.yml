@@ -1,0 +1,94 @@
+name: Release DMG
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, notarize, and smoke test
+    runs-on: macos-14
+    environment: copya-release
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        run: scripts/release-tag-gate.sh
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Run static checks
+        run: |
+          set -euo pipefail
+          bash -n \
+            scripts/build-app.sh \
+            scripts/package-dmg.sh \
+            scripts/release-dmg.sh \
+            scripts/restore-smoke.sh \
+            scripts/ci-import-codesign-cert.sh \
+            scripts/release-tag-gate.sh \
+            scripts/release-smoke.sh
+          git diff --check
+          scripts/oss-scan.sh
+          swift build
+          uv run python -m py_compile deploy.py group_data/example.py tests/test_copya_template.py tests/test_standalone_app.py
+          uv run python -m unittest tests/test_standalone_app.py tests/test_copya_template.py
+
+      - name: Import Developer ID certificate
+        run: scripts/ci-import-codesign-cert.sh
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+
+      - name: Write App Store Connect API key
+        id: appstore-connect-key
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPSTORE_CONNECT_KEY_ID}.p8"
+          printf '%s' "$APPSTORE_CONNECT_API_KEY_P8_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          {
+            printf 'key-path=%s\n' "$key_path"
+            printf 'key-id=%s\n' "$APPSTORE_CONNECT_KEY_ID"
+            printf 'issuer-id=%s\n' "$APPSTORE_CONNECT_ISSUER_ID"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          APPSTORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8_BASE64 }}
+          APPSTORE_CONNECT_KEY_ID: ${{ secrets.APPSTORE_CONNECT_KEY_ID }}
+          APPSTORE_CONNECT_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
+
+      - name: Build, sign, and notarize DMG
+        run: scripts/release-dmg.sh
+        env:
+          COPYA_NOTARYTOOL_KEY: ${{ steps.appstore-connect-key.outputs.key-path }}
+          COPYA_NOTARYTOOL_KEY_ID: ${{ steps.appstore-connect-key.outputs.key-id }}
+          COPYA_NOTARYTOOL_ISSUER_ID: ${{ steps.appstore-connect-key.outputs.issuer-id }}
+
+      - name: Smoke test installed notarized app
+        run: scripts/release-smoke.sh .build/COPYA.dmg
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" .build/COPYA.dmg --verify-tag --generate-notes
+
+      - name: Delete temporary signing keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${COPYA_CODESIGN_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$COPYA_CODESIGN_KEYCHAIN" >/dev/null 2>&1 || true
+          fi
+          security delete-keychain "$RUNNER_TEMP/copya-signing.keychain-db" >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/copya-developer-id.p12"
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
