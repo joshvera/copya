@@ -72,7 +72,7 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertEqual(info["CFBundleName"], "COPYA")
         self.assertEqual(info["CFBundleExecutable"], "COPYA")
         self.assertEqual(info["CFBundleIdentifier"], "com.freesidenyc.copya")
-        self.assertEqual(info["CFBundleShortVersionString"], "1.0.0")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.0.1")
         self.assertTrue(info["LSUIElement"])
         self.assertTrue(entitlements["com.apple.security.personal-information.location"])
         self.assertEqual(agent["Label"], "com.freesidenyc.copya.agent")

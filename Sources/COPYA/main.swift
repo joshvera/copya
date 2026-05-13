@@ -210,7 +210,7 @@ enum Config {
         return path
     }
 
-    static let appVersion = "1.0.0"
+    static let appVersion = "1.0.1"
     static let appName = "COPYA"
     static let bundleIdentifier = "com.freesidenyc.copya"
     static let monitorLaunchdLabel = "com.freesidenyc.copya.agent"

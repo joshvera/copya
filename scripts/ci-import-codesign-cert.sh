@@ -30,6 +30,8 @@ printf '%s' "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$cert_pat
 security create-keychain -p "$keychain_password" "$keychain_path"
 security set-keychain-settings -lut 21600 "$keychain_path"
 security unlock-keychain -p "$keychain_password" "$keychain_path"
+existing_keychains="$(security list-keychains -d user | tr -d '"')"
+security list-keychains -d user -s "$keychain_path" $existing_keychains
 security import "$cert_path" \
   -k "$keychain_path" \
   -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" \
