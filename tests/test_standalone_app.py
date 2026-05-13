@@ -213,6 +213,8 @@ class StandaloneAppTest(unittest.TestCase):
         release_smoke = (ROOT / "scripts" / "release-smoke.sh").read_text()
 
         self.assertIn("environment: copya-release", workflow)
+        self.assertIn("uses: actions/checkout@v6", workflow)
+        self.assertNotIn("actions/checkout@v4", workflow)
         self.assertIn("uses: astral-sh/setup-uv@", workflow)
         self.assertIn("scripts/release-tag-gate.sh", workflow)
         self.assertIn("scripts/oss-scan.sh", workflow)
