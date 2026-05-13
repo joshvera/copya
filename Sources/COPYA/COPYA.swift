@@ -1,4 +1,5 @@
 import AppKit
+import COPYACore
 import CoreLocation
 import CoreWLAN
 import Darwin
@@ -32,6 +33,7 @@ struct RuntimeConfig: Codable {
     var minimum_execution_reserve_bytes: Int64
     var critical_runtime_free_space_bytes: Int64
     var unknown_icloud_placeholder_estimate_bytes: Int64
+    var limited_backup_acknowledged: Bool
 
     static func defaults(home: String) -> RuntimeConfig {
         RuntimeConfig(
@@ -83,7 +85,8 @@ struct RuntimeConfig: Codable {
             kopia_config_file: nil,
             minimum_execution_reserve_bytes: 53687091200,
             critical_runtime_free_space_bytes: 21474836480,
-            unknown_icloud_placeholder_estimate_bytes: 268435456
+            unknown_icloud_placeholder_estimate_bytes: 268435456,
+            limited_backup_acknowledged: false
         )
     }
 
@@ -168,6 +171,7 @@ struct RuntimeConfigOverrides: Decodable {
     var minimum_execution_reserve_bytes: Int64?
     var critical_runtime_free_space_bytes: Int64?
     var unknown_icloud_placeholder_estimate_bytes: Int64?
+    var limited_backup_acknowledged: Bool?
 
     func apply(to defaults: RuntimeConfig) -> RuntimeConfig {
         RuntimeConfig(
@@ -193,7 +197,8 @@ struct RuntimeConfigOverrides: Decodable {
             kopia_config_file: kopia_config_file ?? defaults.kopia_config_file,
             minimum_execution_reserve_bytes: minimum_execution_reserve_bytes ?? defaults.minimum_execution_reserve_bytes,
             critical_runtime_free_space_bytes: critical_runtime_free_space_bytes ?? defaults.critical_runtime_free_space_bytes,
-            unknown_icloud_placeholder_estimate_bytes: unknown_icloud_placeholder_estimate_bytes ?? defaults.unknown_icloud_placeholder_estimate_bytes
+            unknown_icloud_placeholder_estimate_bytes: unknown_icloud_placeholder_estimate_bytes ?? defaults.unknown_icloud_placeholder_estimate_bytes,
+            limited_backup_acknowledged: limited_backup_acknowledged ?? defaults.limited_backup_acknowledged
         )
     }
 }
@@ -210,7 +215,7 @@ enum Config {
         return path
     }
 
-    static let appVersion = "1.0.1"
+    static let appVersion = "1.1.0"
     static let appName = "COPYA"
     static let bundleIdentifier = "com.freesidenyc.copya"
     static let monitorLaunchdLabel = "com.freesidenyc.copya.agent"
@@ -223,7 +228,49 @@ enum Config {
     static let logDir = runtimeRoot.map { "\($0)/Logs/COPYA" } ?? "\(home)/Library/Logs/COPYA"
     static let explicitConfigFile = normalizedPath(ProcessInfo.processInfo.environment["COPYA_CONFIG_FILE"])
     static let configFile = explicitConfigFile ?? "\(appSupportDir)/config.json"
-    static let runtime = RuntimeConfig.load(path: configFile, home: home, requireValid: explicitConfigFile != nil)
+    private static let runtimeDefaults = RuntimeConfig.defaults(home: home)
+    private static let runtimeStore = COPYACore.RuntimeConfigStore(
+        path: configFile,
+        defaults: runtimeDefaults,
+        requireValid: explicitConfigFile != nil
+    )
+    private static let runtimeLock = NSLock()
+    private static var runtimeStorage = loadRuntime()
+
+    static var runtime: RuntimeConfig {
+        runtimeLock.lock()
+        defer {
+            runtimeLock.unlock()
+        }
+        return runtimeStorage
+    }
+
+    static var configExists: Bool {
+        runtimeStore.exists
+    }
+
+    static func saveRuntime(_ config: RuntimeConfig) throws {
+        let validated = config.validated(fallback: runtimeDefaults)
+        try runtimeStore.save(validated)
+        runtimeLock.lock()
+        runtimeStorage = validated
+        runtimeLock.unlock()
+    }
+
+    static func reloadRuntime() {
+        runtimeLock.lock()
+        runtimeStorage = loadRuntime()
+        runtimeLock.unlock()
+    }
+
+    private static func loadRuntime() -> RuntimeConfig {
+        RuntimeConfig.load(
+            path: configFile,
+            home: home,
+            requireValid: explicitConfigFile != nil
+        )
+    }
+
     static var backupSource: String { runtime.backup_source }
     static let backupIgnoreFile = "\(appSupportDir)/kopiaignore"
     static var backupIgnorePatterns: [String] { runtime.backup_ignore_patterns }
@@ -257,6 +304,7 @@ enum Config {
     static var unknownICloudPlaceholderEstimateBytes: Int64 {
         runtime.unknown_icloud_placeholder_estimate_bytes
     }
+    static var limitedBackupAcknowledged: Bool { runtime.limited_backup_acknowledged }
     static var diskFreeSpaceCheckPaths: [String] {
         [
             "\(cacheDir)/kopia",
@@ -345,6 +393,7 @@ struct ConfigSummary: Codable {
     var minimum_execution_reserve_bytes: Int64
     var critical_runtime_free_space_bytes: Int64
     var unknown_icloud_placeholder_estimate_bytes: Int64
+    var limited_backup_acknowledged: Bool
     var disk_free_space_check_paths: [String]
 }
 
@@ -389,6 +438,7 @@ extension ConfigSummary {
         case minimum_execution_reserve_bytes
         case critical_runtime_free_space_bytes
         case unknown_icloud_placeholder_estimate_bytes
+        case limited_backup_acknowledged
         case disk_free_space_check_paths
     }
 
@@ -433,6 +483,7 @@ extension ConfigSummary {
         minimum_execution_reserve_bytes = try container.decodeIfPresent(Int64.self, forKey: .minimum_execution_reserve_bytes) ?? Config.minimumExecutionReserveBytes
         critical_runtime_free_space_bytes = try container.decodeIfPresent(Int64.self, forKey: .critical_runtime_free_space_bytes) ?? Config.criticalRuntimeFreeSpaceBytes
         unknown_icloud_placeholder_estimate_bytes = try container.decodeIfPresent(Int64.self, forKey: .unknown_icloud_placeholder_estimate_bytes) ?? Config.unknownICloudPlaceholderEstimateBytes
+        limited_backup_acknowledged = try container.decodeIfPresent(Bool.self, forKey: .limited_backup_acknowledged) ?? Config.limitedBackupAcknowledged
         disk_free_space_check_paths = try container.decodeIfPresent([String].self, forKey: .disk_free_space_check_paths) ?? Config.diskFreeSpaceCheckPaths
     }
 }
@@ -479,6 +530,7 @@ enum ConfigSummaryFactory {
             minimum_execution_reserve_bytes: Config.minimumExecutionReserveBytes,
             critical_runtime_free_space_bytes: Config.criticalRuntimeFreeSpaceBytes,
             unknown_icloud_placeholder_estimate_bytes: Config.unknownICloudPlaceholderEstimateBytes,
+            limited_backup_acknowledged: Config.limitedBackupAcknowledged,
             disk_free_space_check_paths: Config.diskFreeSpaceCheckPaths
         )
     }
@@ -914,6 +966,8 @@ struct StatusSnapshot: Codable {
     var protected_data_probe_results: [ProtectedDataProbeResult]?
     var cloud_materialization: CloudMaterializationSnapshot?
     var kopia_ran_after_materialization: Bool?
+    var setup_gate: SetupGateResult?
+    var repository_status: RepositoryStatusSnapshot?
     var config_summary: ConfigSummary
 
     enum CodingKeys: String, CodingKey {
@@ -965,6 +1019,8 @@ struct StatusSnapshot: Codable {
         case protected_data_probe_results
         case cloud_materialization
         case kopia_ran_after_materialization
+        case setup_gate
+        case repository_status
         case config_summary
     }
 
@@ -1019,6 +1075,8 @@ struct StatusSnapshot: Codable {
         try encodeOptional(protected_data_probe_results, into: &container, forKey: .protected_data_probe_results)
         try encodeOptional(cloud_materialization, into: &container, forKey: .cloud_materialization)
         try encodeOptional(kopia_ran_after_materialization, into: &container, forKey: .kopia_ran_after_materialization)
+        try encodeOptional(setup_gate, into: &container, forKey: .setup_gate)
+        try encodeOptional(repository_status, into: &container, forKey: .repository_status)
     }
 
     private func encodeOptional<T: Encodable>(
@@ -1045,6 +1103,7 @@ enum BackupState: String {
     case needsFullDiskAccess = "needs_full_disk_access"
     case needsDiskSpace = "needs_disk_space"
     case needsSecret = "needs_secret"
+    case setupIncomplete = "setup_incomplete"
     case cloudDownloadBlocked = "cloud_download_blocked"
     case cloudPartial = "cloud_partial"
     case backupPartial = "backup_partial"
@@ -3127,6 +3186,11 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var kopiaRanAfterMaterialization = false
     @Published var diskHealth = DiskHealthSnapshot.unknown()
     @Published var cloudCapacityEstimate = CloudCapacityEstimate.unknown()
+    @Published var setupGate = SetupGateResult(
+        complete: false,
+        blockers: [.configMissing, .passwordMissing, .repositoryNotConnected]
+    )
+    @Published var repositoryStatus = RepositoryStatusSnapshot.unknown()
 
     private let locationManager = CLLocationManager()
     private let pathMonitor = NWPathMonitor()
@@ -3190,6 +3254,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         pathMonitor.start(queue: pathQueue)
 
         refreshNetwork(reason: "startup", shouldEvaluateSchedule: false)
+        refreshSetupGate()
+        refreshRepositoryStatus()
         seedLastSuccessFromLogIfNeededThenReconcile()
         timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             self?.tick()
@@ -3305,6 +3371,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         protectedDataProbeResults = status.protected_data_probe_results ?? []
         cloudMaterialization = status.cloud_materialization ?? .empty()
         kopiaRanAfterMaterialization = status.kopia_ran_after_materialization ?? false
+        setupGate = status.setup_gate ?? setupGate
+        repositoryStatus = status.repository_status ?? repositoryStatus
         if let statusDiskHealth = status.disk_health {
             diskHealth = statusDiskHealth
         }
@@ -3375,6 +3443,458 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         updateDerivedState()
         writeStatus()
         completeOneShot(exitCode: 1)
+    }
+
+    var hasActiveWork: Bool {
+        activeProcess != nil
+            || activePID != nil
+            || activeRunID != nil
+            || activeMaterializationID != nil
+            || activeOperationID != nil
+    }
+
+    var canSavePreferences: Bool {
+        !viewerOnly && !hasActiveWork
+    }
+
+    func saveRuntimeConfig(_ config: RuntimeConfig) throws {
+        guard canSavePreferences else {
+            throw NSError(
+                domain: Config.bundleIdentifier,
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot save preferences while COPYA work is running"]
+            )
+        }
+        try Config.saveRuntime(config)
+        appendLog("preferences saved")
+        refreshNetwork(reason: "preferences-saved", shouldEvaluateSchedule: false)
+        refreshSetupGate()
+        writeStatus()
+    }
+
+    func storeKeychainPasswordFromPreferences(_ password: String) throws {
+        guard !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: Config.bundleIdentifier,
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Kopia password cannot be empty"]
+            )
+        }
+        try KeychainPasswordStore.storePassword(password)
+        appendLog("Kopia password stored in Keychain")
+        refreshSetupGate()
+        refreshRepositoryStatus()
+        writeStatus()
+    }
+
+    func refreshSetupGate() {
+        setupGate = evaluateSetupGate()
+    }
+
+    private func evaluateSetupGate() -> SetupGateResult {
+        let source = Config.backupSource
+        var isDirectory = ObjCBool(false)
+        let sourceExists = FileManager.default.fileExists(atPath: source, isDirectory: &isDirectory)
+        let sourceReadable = sourceExists && FileManager.default.isReadableFile(atPath: source)
+        let needsLocation = Config.networkPolicyEnabled
+            && ["permission", "redacted"].contains(network.state)
+        let fullDiskAcceptable = Config.limitedBackupAcknowledged || !fullDiskAccessBlocked
+        return SetupGateResult.evaluate(
+            SetupGateInput(
+                configExists: Config.configExists,
+                sourceExists: sourceExists,
+                sourceReadable: sourceReadable,
+                passwordAvailable: passwordIsAvailableForSetup(),
+                repositoryConnected: repositoryStatus.connected,
+                networkPolicyNeedsPermission: needsLocation,
+                fullDiskAccessAcceptable: fullDiskAcceptable,
+                activeWorkRunning: false
+            )
+        )
+    }
+
+    private func passwordIsAvailableForSetup() -> Bool {
+        switch Config.passwordSource {
+        case "keychain":
+            return KeychainPasswordStore.hasPassword()
+        case "environment":
+            return !(childEnvironment()[Config.passwordEnvVar] ?? "").isEmpty
+        case "onepassword":
+            return !Config.kopiaPasswordRef.isEmpty && CommandRunner.findExecutable("op") != nil
+        case "command":
+            return !Config.passwordCommand.isEmpty
+        default:
+            return false
+        }
+    }
+
+    private func refreshRepositoryStatusSynchronously(timeoutSeconds: Int = 10) {
+        guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
+            repositoryStatus = RepositoryStatusSnapshot(
+                checkedAt: DateFormatters.iso.string(from: Date()),
+                state: .failed,
+                detail: "Kopia is not installed or bundled"
+            )
+            refreshSetupGate()
+            return
+        }
+        let password = (try? readConfiguredPasswordForRepositoryWork()) ?? ""
+        var environment = childEnvironment()
+        if !password.isEmpty {
+            environment["KOPIA_PASSWORD"] = password
+        }
+        do {
+            let result = try CommandRunner.run(
+                kopiaPath,
+                arguments: KopiaRepositoryCommand.statusArguments(configFile: Config.kopiaConfigFile),
+                environment: environment,
+                timeoutSeconds: timeoutSeconds
+            )
+            let state = RepositoryStatusClassifier.classify(
+                status: result.status,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                timedOut: result.timedOut
+            )
+            repositoryStatus = RepositoryStatusSnapshot(
+                checkedAt: DateFormatters.iso.string(from: Date()),
+                state: state,
+                detail: repositoryDetail(state: state, stderr: result.stderr)
+            )
+        } catch {
+            repositoryStatus = RepositoryStatusSnapshot(
+                checkedAt: DateFormatters.iso.string(from: Date()),
+                state: .failed,
+                detail: error.localizedDescription
+            )
+        }
+        refreshSetupGate()
+    }
+
+    func refreshRepositoryStatus() {
+        guard !viewerOnly else {
+            return
+        }
+        guard !hasActiveWork else {
+            return
+        }
+        let operationID = UUID()
+        beginOperation(id: operationID, name: "repository_status", detail: "checking Kopia repository")
+        processQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+            let kopiaPath = CommandRunner.findExecutable("kopia")
+            let password = (try? self.readConfiguredPasswordForRepositoryWork()) ?? ""
+            DispatchQueue.main.async {
+                guard self.activeOperationID == operationID else {
+                    return
+                }
+                guard let kopiaPath else {
+                    self.repositoryStatus = RepositoryStatusSnapshot(
+                        checkedAt: DateFormatters.iso.string(from: Date()),
+                        state: .failed,
+                        detail: "Kopia is not installed or bundled"
+                    )
+                    self.clearOperation(id: operationID)
+                    self.refreshSetupGate()
+                    self.updateDerivedState()
+                    self.writeStatus()
+                    return
+                }
+                var environment = self.childEnvironment()
+                if !password.isEmpty {
+                    environment["KOPIA_PASSWORD"] = password
+                }
+                self.processQueue.async { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    do {
+                        let result = try CommandRunner.run(
+                            kopiaPath,
+                            arguments: KopiaRepositoryCommand.statusArguments(configFile: Config.kopiaConfigFile),
+                            environment: environment,
+                            timeoutSeconds: 20
+                        )
+                        DispatchQueue.main.async {
+                            guard self.activeOperationID == operationID else {
+                                return
+                            }
+                            let state = RepositoryStatusClassifier.classify(
+                                status: result.status,
+                                stdout: result.stdout,
+                                stderr: result.stderr,
+                                timedOut: result.timedOut
+                            )
+                            self.repositoryStatus = RepositoryStatusSnapshot(
+                                checkedAt: DateFormatters.iso.string(from: Date()),
+                                state: state,
+                                detail: self.repositoryDetail(state: state, stderr: result.stderr)
+                            )
+                            self.clearOperation(id: operationID)
+                            self.refreshSetupGate()
+                            self.updateDerivedState()
+                            self.writeStatus()
+                        }
+                    } catch {
+                        DispatchQueue.main.async {
+                            guard self.activeOperationID == operationID else {
+                                return
+                            }
+                            self.repositoryStatus = RepositoryStatusSnapshot(
+                                checkedAt: DateFormatters.iso.string(from: Date()),
+                                state: .failed,
+                                detail: error.localizedDescription
+                            )
+                            self.clearOperation(id: operationID)
+                            self.refreshSetupGate()
+                            self.updateDerivedState()
+                            self.writeStatus()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func setupBackblazeRepository(
+        mode: KopiaRepositoryMode,
+        bucket: String,
+        endpoint: String,
+        region: String,
+        prefix: String,
+        accessKeyID: String,
+        applicationKey: String
+    ) {
+        let request = BackblazeB2S3RepositoryRequest(
+            mode: mode,
+            bucket: bucket.trimmingCharacters(in: .whitespacesAndNewlines),
+            endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            region: region.trimmingCharacters(in: .whitespacesAndNewlines),
+            prefix: prefix.trimmingCharacters(in: .whitespacesAndNewlines),
+            accessKeyID: accessKeyID,
+            applicationKey: applicationKey,
+            configFile: Config.kopiaConfigFile
+        )
+        guard !request.bucket.isEmpty,
+              !request.resolvedEndpoint.isEmpty,
+              !request.accessKeyID.isEmpty,
+              !request.applicationKey.isEmpty else {
+            recordManualActionFailure("Backblaze B2 setup needs bucket, region or endpoint, key ID, and application key")
+            return
+        }
+        runRepositorySetup(kind: "Backblaze B2 S3 \(mode.rawValue)") { [weak self] password in
+            guard let self else {
+                return nil
+            }
+            return KopiaRepositoryCommand.backblazeB2S3Spec(
+                request: request,
+                baseEnvironment: self.childEnvironment(),
+                kopiaPassword: password
+            )
+        }
+    }
+
+    func setupFilesystemRepository(mode: KopiaRepositoryMode, path: String) {
+        let request = FilesystemRepositoryRequest(
+            mode: mode,
+            path: path.trimmingCharacters(in: .whitespacesAndNewlines),
+            configFile: Config.kopiaConfigFile
+        )
+        guard !request.path.isEmpty else {
+            recordManualActionFailure("Filesystem repository path is required")
+            return
+        }
+        runRepositorySetup(kind: "filesystem \(mode.rawValue)") { [weak self] password in
+            guard let self else {
+                return nil
+            }
+            return KopiaRepositoryCommand.filesystemSpec(
+                request: request,
+                baseEnvironment: self.childEnvironment(),
+                kopiaPassword: password
+            )
+        }
+    }
+
+    private func runRepositorySetup(
+        kind: String,
+        buildSpec: @escaping (String) -> KopiaProcessSpec?
+    ) {
+        guard !viewerOnly else {
+            recordManualActionFailure("Repository setup is controlled by the launch agent instance")
+            return
+        }
+        guard !hasActiveWork else {
+            recordManualActionFailure("Cannot run repository setup while backup work is active")
+            return
+        }
+        guard let kopiaPath = CommandRunner.findExecutable("kopia") else {
+            recordManualActionFailure("Kopia is not installed or bundled")
+            return
+        }
+        let operationID = UUID()
+        beginOperation(id: operationID, name: "repository_setup", detail: "running \(kind)")
+
+        processQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+            let password: String
+            do {
+                password = try self.readConfiguredPasswordForRepositoryWork()
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordSecretUnavailable(
+                        "Unable to read Kopia password for repository setup",
+                        detail: String(describing: error),
+                        operationID: operationID
+                    )
+                }
+                return
+            }
+            guard let spec = buildSpec(password) else {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordManualActionFailure("Unable to build repository setup command")
+                }
+                return
+            }
+            do {
+                let result = try CommandRunner.run(
+                    kopiaPath,
+                    arguments: spec.arguments,
+                    environment: spec.environment,
+                    timeoutSeconds: 120
+                )
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    if result.status == 0 {
+                        self.appendLog("repository setup complete kind=\"\(kind)\" command=\"\(spec.redactedDisplay)\"")
+                        self.tightenKopiaConfigPermissions()
+                        self.repositoryStatus = RepositoryStatusSnapshot(
+                            checkedAt: DateFormatters.iso.string(from: Date()),
+                            state: .connected,
+                            detail: "\(kind) complete"
+                        )
+                        self.clearOperation(id: operationID)
+                        self.refreshSetupGate()
+                        self.updateDerivedState()
+                        self.writeStatus()
+                    } else {
+                        let detail = self.repositoryDetail(state: .failed, stderr: result.stderr)
+                        self.repositoryStatus = RepositoryStatusSnapshot(
+                            checkedAt: DateFormatters.iso.string(from: Date()),
+                            state: .failed,
+                            detail: detail
+                        )
+                        self.clearOperation(id: operationID)
+                        self.recordFailure(
+                            "Repository setup failed",
+                            kind: "repository_setup_failed",
+                            detail: detail
+                        )
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.repositoryStatus = RepositoryStatusSnapshot(
+                        checkedAt: DateFormatters.iso.string(from: Date()),
+                        state: .failed,
+                        detail: error.localizedDescription
+                    )
+                    self.clearOperation(id: operationID)
+                    self.recordFailure(
+                        "Repository setup failed",
+                        kind: "repository_setup_failed",
+                        detail: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func readConfiguredPasswordForRepositoryWork() throws -> String {
+        switch Config.passwordSource {
+        case "keychain":
+            return try KeychainPasswordStore.readPassword()
+        case "environment":
+            return childEnvironment()[Config.passwordEnvVar] ?? ""
+        case "onepassword":
+            guard let opPath = CommandRunner.findExecutable("op") else {
+                throw KeychainPasswordStore.Error.notFound
+            }
+            let result = try CommandRunner.run(
+                opPath,
+                arguments: ["read", Config.kopiaPasswordRef],
+                environment: childEnvironment(),
+                timeoutSeconds: Config.passwordReadTimeoutSeconds
+            )
+            guard result.status == 0 else {
+                throw NSError(
+                    domain: Config.bundleIdentifier,
+                    code: Int(result.status),
+                    userInfo: [NSLocalizedDescriptionKey: "1Password read failed"]
+                )
+            }
+            return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        case "command":
+            guard let executable = Config.passwordCommand.first else {
+                return ""
+            }
+            let result = try CommandRunner.run(
+                executable,
+                arguments: Array(Config.passwordCommand.dropFirst()),
+                environment: childEnvironment(),
+                timeoutSeconds: Config.passwordReadTimeoutSeconds
+            )
+            guard result.status == 0 else {
+                return ""
+            }
+            return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        default:
+            return ""
+        }
+    }
+
+    private func repositoryDetail(state: RepositoryConnectionState, stderr: String) -> String? {
+        switch state {
+        case .connected:
+            return "Repository connected"
+        case .missingPassword:
+            return "Kopia password is required"
+        case .unknown:
+            return nil
+        case .disconnected, .failed:
+            let detail = stderr
+                .split(separator: "\n")
+                .last
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail?.isEmpty == false ? detail : "Repository is not connected"
+        }
+    }
+
+    private func tightenKopiaConfigPermissions() {
+        let paths = [
+            Config.kopiaConfigFile,
+            "\(Config.kopiaHome)/.config/kopia/repository.config",
+            "\(Config.kopiaHome)/Library/Application Support/kopia/repository.config",
+        ].compactMap { $0 }
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            chmod(path, 0o600)
+        }
     }
 
     private func refreshInternalKopiaActivity(reason: String) {
@@ -3674,6 +4194,23 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
         guard externalKopiaPIDs.isEmpty else {
             appendLog("start blocked: external Kopia process detected pids=\(externalKopiaPIDs.map { String($0) }.joined(separator: ","))")
+            updateDerivedState()
+            writeStatus()
+            completeOneShot(exitCode: 1)
+            return
+        }
+
+        if repositoryStatus.state == .unknown {
+            refreshRepositoryStatusSynchronously()
+        }
+        refreshSetupGate()
+        guard setupGate.complete else {
+            let reason = setupGate.summary
+            lastFailureAt = Date()
+            lastFailure = reason
+            lastFailureKind = "setup_incomplete"
+            lastFailureDetail = reason
+            appendLog("start blocked: setup incomplete: \(reason)")
             updateDerivedState()
             writeStatus()
             completeOneShot(exitCode: 1)
@@ -5212,6 +5749,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                 return "Needs Keychain Password"
             }
             return "Secret Unavailable"
+        case .setupIncomplete:
+            return "Setup Required"
         case .cloudDownloadBlocked:
             return "Cloud Download Blocked"
         case .cloudPartial:
@@ -5242,7 +5781,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             return "person.crop.circle.badge.exclamationmark"
         case .paused:
             return "pause.circle"
-        case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .needsSecret, .cloudDownloadBlocked, .failed:
+        case .needsPermission, .needsFullDiskAccess, .needsDiskSpace, .needsSecret, .setupIncomplete, .cloudDownloadBlocked, .failed:
             return "exclamationmark.triangle"
         case .backupPartial:
             if lastSnapshotResult == KopiaSnapshotResult.partialActionRequired {
@@ -5264,6 +5803,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             && activeMaterializationID == nil
             && activeOperationID == nil
             && externalKopiaPIDs.isEmpty
+            && setupGate.complete
             && network.allowed
             && diskHealth.ok
     }
@@ -5949,6 +6489,15 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
     private func childEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
+        for key in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "B2_APPLICATION_KEY_ID",
+            "B2_APPLICATION_KEY",
+        ] {
+            environment.removeValue(forKey: key)
+        }
         environment["PATH"] = Config.executableSearchPath.joined(separator: ":")
         try? FileManager.default.createDirectory(
             atPath: Config.kopiaHome,
@@ -5987,12 +6536,26 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         if activeOperationID != nil {
-            state = .startingBackup
+            state = activeOperation?.hasPrefix("repository") == true ? .setupIncomplete : .startingBackup
             return
         }
 
         if !externalKopiaPIDs.isEmpty {
             state = .externalBackupDetected
+            return
+        }
+
+        refreshSetupGate()
+        if !setupGate.complete {
+            if setupGate.blockers.contains(.passwordMissing) {
+                state = .needsSecret
+            } else if setupGate.blockers.contains(.locationPermissionNeeded) {
+                state = .needsPermission
+            } else if setupGate.blockers.contains(.fullDiskAccessNeeded) {
+                state = .needsFullDiskAccess
+            } else {
+                state = .setupIncomplete
+            }
             return
         }
 
@@ -6246,6 +6809,8 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             protected_data_probe_results: protectedDataProbeResults,
             cloud_materialization: cloudMaterialization,
             kopia_ran_after_materialization: kopiaRanAfterMaterialization,
+            setup_gate: setupGate,
+            repository_status: repositoryStatus,
             config_summary: configSummary()
         )
     }
@@ -6706,6 +7271,14 @@ enum KeychainPasswordStore {
         return password.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func hasPassword() -> Bool {
+        var query = baseQuery
+        query[kSecReturnData as String] = false
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        return status == errSecSuccess
+    }
+
     static func storePassword(_ password: String) throws {
         let data = Data(password.utf8)
         let updateStatus = SecItemUpdate(
@@ -6818,6 +7391,19 @@ func printStatusJSONAndExit() -> Never {
         protected_data_probe_results: [],
         cloud_materialization: CloudMaterializationSnapshot.empty(),
         kopia_ran_after_materialization: false,
+        setup_gate: SetupGateResult.evaluate(
+            SetupGateInput(
+                configExists: Config.configExists,
+                sourceExists: FileManager.default.fileExists(atPath: Config.backupSource),
+                sourceReadable: FileManager.default.isReadableFile(atPath: Config.backupSource),
+                passwordAvailable: KeychainPasswordStore.hasPassword() || Config.passwordSource == "environment",
+                repositoryConnected: false,
+                networkPolicyNeedsPermission: Config.networkPolicyEnabled && !network.allowed,
+                fullDiskAccessAcceptable: Config.limitedBackupAcknowledged,
+                activeWorkRunning: false
+            )
+        ),
+        repository_status: RepositoryStatusSnapshot.unknown(),
         config_summary: ConfigSummaryFactory.current()
     )
     printEncodedJSON(status)
@@ -6986,6 +7572,11 @@ struct KopiaBackupMonitorApp: App {
             BackupMonitor.shared.startViewer()
         } else {
             BackupMonitor.shared.start()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !BackupMonitor.shared.setupGate.complete {
+                    SetupPreferencesWindowController.shared.show()
+                }
+            }
         }
     }
 
@@ -6998,6 +7589,8 @@ struct KopiaBackupMonitorApp: App {
             Text("SSID: \(monitor.ssidText)")
             Text("Network: \(monitor.network.reason)")
             Text("Launch agent: \(LaunchAgentManager.statusText)")
+            Text("Setup: \(monitor.setupGate.summary)")
+            Text("Repository: \(monitor.repositoryStatus.state.rawValue)")
             if monitor.network.is_expensive || monitor.network.is_constrained {
                 Text("macOS marks this network as \(monitor.network.is_constrained ? "constrained" : "expensive")")
             }
@@ -7037,6 +7630,10 @@ struct KopiaBackupMonitorApp: App {
             }
             if let abort = monitor.lastAbortReason {
                 Text("Last abort: \(abort)")
+            }
+            Divider()
+            Button("Setup & Preferences...") {
+                SetupPreferencesWindowController.shared.show()
             }
             Divider()
             Button("Start Backup Now") {

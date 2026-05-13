@@ -24,7 +24,7 @@ if ! git merge-base --is-ancestor "$tag_commit" "$main_commit"; then
 fi
 
 tag_version="${tag#v}"
-swift_version="$(sed -n 's/^[[:space:]]*static let appVersion = "\([^"]*\)".*/\1/p' Sources/COPYA/main.swift | head -n 1)"
+swift_version="$(sed -n 's/^[[:space:]]*static let appVersion = "\([^"]*\)".*/\1/p' Sources/COPYA/COPYA.swift | head -n 1)"
 plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
 
 if [[ "$swift_version" != "$tag_version" ]]; then

@@ -31,7 +31,7 @@ cloud provider placeholder offline.
   Kopia artifact listed in `release/kopia.env`. The archive is cached under
   `.build/kopia` after checksum verification.
 - A Kopia repository already connected locally, or one you connect during setup.
-- A Kopia repository password available through one configured secret source.
+- A Kopia repository password stored in the macOS Keychain during setup.
 - A Developer ID Application or Apple Development signing identity if you want
   to register the bundled login agent from a source build. The build script
   auto-detects one when available. Ad-hoc builds can run manually, but macOS may
@@ -60,9 +60,9 @@ native Swift source with SwiftPM, builds the app bundle, copies the bundled
 LaunchAgent plist into `Contents/Library/LaunchAgents`, downloads the pinned
 Kopia release from `release/kopia.env`, verifies its SHA-256, bundles it under
 `Contents/Resources/bin/kopia`, includes Kopia license/notice files, and
-codesigns the result. The LaunchAgent runs the signed `COPYA` executable in
-headless agent mode with `COPYA_AGENT=1`, so launchd owns one backup controller
-while the menu UI can remain a status viewer.
+codesigns the result. The LaunchAgent runs the signed `COPYA` executable as the
+menu bar app, so the login item owns scheduling, setup, backup control, and the
+visible status UI in one process.
 
 For local development only, you can override the bundled Kopia binary:
 
@@ -152,6 +152,37 @@ You can also use the menu items:
 The LaunchAgent plist is bundled in the app and uses `BundleProgram`, so macOS
 can resolve the executable relative to the app bundle.
 
+## Setup & Preferences
+
+Open `Setup & Preferences...` from the COPYA menu. On first run, COPYA opens the
+window automatically when setup is incomplete.
+
+The setup gate blocks scheduled backups, manual `Start Backup Now`, and
+`--backup-once` until the app can prove the basics:
+
+- preferences have been saved;
+- backup source exists and is readable;
+- Kopia password is present in Keychain;
+- Kopia repository is connected;
+- Wi-Fi permission is acceptable when network policy is enabled;
+- Full Disk Access has not failed, or you explicitly acknowledge a limited
+  backup.
+
+The launch agent still starts COPYA at login when setup is incomplete. It just
+does not start backup work until the gate is green. This is intentional, a setup
+window that never launches would be performance art.
+
+Repository setup currently supports:
+
+- Backblaze B2 through Kopia's S3 provider, using bucket, region or endpoint,
+  key ID, application key, optional prefix, and create/connect mode;
+- local filesystem repositories for testing and demos.
+
+B2 credentials are passed only as `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` to the one repository setup subprocess. They are not
+stored in config, not written to logs/status/debug output, and not passed to
+snapshot backups.
+
 ## Runtime Config
 
 The standalone app now uses runtime paths under the current macOS user:
@@ -165,9 +196,9 @@ The standalone app now uses runtime paths under the current macOS user:
 ```
 
 The default backup source is the current user's home directory. The first public
-onboarding pass still needs editable UI for source path, schedule, denylisted
-SSIDs, repository import, and secret provider selection. Until then, create and
-edit the JSON config directly:
+onboarding flow can edit source path, schedule, denylisted SSIDs, cloud roots,
+cloud materialization, and the limited-backup acknowledgement. You can still
+inspect or seed config from the command line:
 
 ```bash
 "/Applications/COPYA.app/Contents/MacOS/COPYA" --write-default-config
@@ -176,8 +207,8 @@ edit the JSON config directly:
 
 Partial config files are allowed. Missing fields fall back to safe defaults, so
 you can override only the values you care about instead of maintaining a cursed
-giant config blob by hand. For now, the legacy pyinfra path remains available as
-a migration fallback for power-user configuration.
+giant config blob by hand. Saving from Preferences writes a complete
+`config.json` atomically with restrictive permissions.
 
 CI and tests can isolate runtime state without touching the real user profile:
 
@@ -199,14 +230,15 @@ and `cloud_materialization_enabled` to `false`, use `password_source:
 COPYA passes `KOPIA_PASSWORD` only to the Kopia child process. The password is
 not written to logs, status JSON, or git.
 
-Standalone builds default to the macOS Keychain:
+Standalone builds use the macOS Keychain. Store the password in
+`Setup & Preferences...`, or from the CLI:
 
 ```bash
 printf '%s' 'your-kopia-repository-password' \
   | "/Applications/COPYA.app/Contents/MacOS/COPYA" --store-password-in-keychain
 ```
 
-The legacy pyinfra path also supports environment, command, and 1Password
+The legacy pyinfra path and isolated CI smoke tests also support environment, command, and 1Password
 sources through `group_data/all.py`:
 
 ```python
@@ -227,17 +259,15 @@ retries instead of pretending Kopia failed.
 
 ## Connect Kopia
 
-Create or connect the Kopia repository before enabling unattended backups. For
-Backblaze B2:
+Create or connect the Kopia repository from `Setup & Preferences...`.
 
-```bash
-kopia repository connect b2
-```
+For Backblaze B2, COPYA uses Kopia's S3 repository provider instead of the
+deprecated native B2 provider. Enter the existing bucket, region or endpoint,
+Backblaze application key ID, application key, optional prefix, and choose
+`Create` or `Connect`.
 
-Repository credentials stay outside this repo. The standalone onboarding flow
-will eventually wrap this, but COPYA will not create cloud-provider accounts,
-buckets, or B2 application keys for you. Some chores still require a human with
-buttons and consequences.
+COPYA does not create cloud-provider accounts, buckets, or Backblaze application
+keys for you. Some chores still require a human with buttons and consequences.
 
 ## Legacy Pyinfra Deploy
 

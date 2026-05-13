@@ -10,7 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class StandaloneAppTest(unittest.TestCase):
     def test_native_swift_source_is_not_a_jinja_template(self) -> None:
-        source = (ROOT / "Sources" / "COPYA" / "main.swift").read_text()
+        source = (ROOT / "Sources" / "COPYA" / "COPYA.swift").read_text()
+        setup_source = (ROOT / "Sources" / "COPYA" / "SetupPreferencesView.swift").read_text()
+        core_sources = "\n".join(
+            path.read_text()
+            for path in sorted((ROOT / "Sources" / "COPYACore").glob("*.swift"))
+        )
 
         self.assertIn('static let appName = "COPYA"', source)
         self.assertIn('static let bundleIdentifier = "com.freesidenyc.copya"', source)
@@ -37,6 +42,15 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn("SecItemCopyMatching", source)
         self.assertIn("--store-password-in-keychain", source)
         self.assertIn("--backup-once", source)
+        self.assertIn("Setup & Preferences...", source)
+        self.assertIn("setupGate.complete", source)
+        self.assertIn("refreshRepositoryStatusSynchronously", source)
+        self.assertIn("AWS_ACCESS_KEY_ID", core_sources)
+        self.assertIn("AWS_SECRET_ACCESS_KEY", core_sources)
+        self.assertIn("repository\", request.mode.rawValue, \"s3", core_sources)
+        self.assertIn("SetupPreferencesWindowController", setup_source)
+        self.assertIn("Store Password in Keychain", setup_source)
+        self.assertIn("Backblaze B2 (Kopia S3 provider)", setup_source)
         self.assertIn("--agent", source)
         self.assertIn('ProcessInfo.processInfo.environment["COPYA_AGENT"] == "1"', source)
         self.assertIn('"/bin/launchctl"', source)
@@ -72,12 +86,12 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertEqual(info["CFBundleName"], "COPYA")
         self.assertEqual(info["CFBundleExecutable"], "COPYA")
         self.assertEqual(info["CFBundleIdentifier"], "com.freesidenyc.copya")
-        self.assertEqual(info["CFBundleShortVersionString"], "1.0.1")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.1.0")
         self.assertTrue(info["LSUIElement"])
         self.assertTrue(entitlements["com.apple.security.personal-information.location"])
         self.assertEqual(agent["Label"], "com.freesidenyc.copya.agent")
         self.assertEqual(agent["BundleProgram"], "Contents/MacOS/COPYA")
-        self.assertEqual(agent["EnvironmentVariables"]["COPYA_AGENT"], "1")
+        self.assertNotIn("COPYA_AGENT", agent.get("EnvironmentVariables", {}))
         self.assertTrue(agent["RunAtLoad"])
 
     def test_build_and_package_scripts_do_not_require_pyinfra_or_jinja(self) -> None:
