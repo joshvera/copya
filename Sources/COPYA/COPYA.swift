@@ -215,7 +215,7 @@ enum Config {
         return path
     }
 
-    static let appVersion = "1.1.0"
+    static let appVersion = "1.1.1"
     static let appName = "COPYA"
     static let bundleIdentifier = "com.freesidenyc.copya"
     static let monitorLaunchdLabel = "com.freesidenyc.copya.agent"
@@ -3255,7 +3255,9 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         refreshNetwork(reason: "startup", shouldEvaluateSchedule: false)
         refreshSetupGate()
-        refreshRepositoryStatus()
+        if !oneShotMode {
+            refreshRepositoryStatus()
+        }
         seedLastSuccessFromLogIfNeededThenReconcile()
         timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             self?.tick()
