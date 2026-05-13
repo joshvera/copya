@@ -146,8 +146,8 @@ mkdir -p \
 cp "$BIN_DIR/COPYA" "$APP_DIR/Contents/MacOS/COPYA"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ROOT_DIR/Resources/COPYA.entitlements" "$APP_DIR/Contents/Resources/COPYA.entitlements"
-cp "$ROOT_DIR/Resources/com.joshvera.copya.agent.plist" \
-  "$APP_DIR/Contents/Library/LaunchAgents/com.joshvera.copya.agent.plist"
+cp "$ROOT_DIR/Resources/com.freesidenyc.copya.agent.plist" \
+  "$APP_DIR/Contents/Library/LaunchAgents/com.freesidenyc.copya.agent.plist"
 
 cp "$KOPIA_BIN" "$APP_DIR/Contents/Resources/bin/kopia"
 if [[ -n "$KOPIA_LICENSE" && -f "$KOPIA_LICENSE" ]]; then

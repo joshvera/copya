@@ -212,8 +212,8 @@ enum Config {
 
     static let appVersion = "1.0.0"
     static let appName = "COPYA"
-    static let bundleIdentifier = "com.joshvera.copya"
-    static let monitorLaunchdLabel = "com.joshvera.copya.agent"
+    static let bundleIdentifier = "com.freesidenyc.copya"
+    static let monitorLaunchdLabel = "com.freesidenyc.copya.agent"
     static let home = FileManager.default.homeDirectoryForCurrentUser.path
     static let currentUser = NSUserName()
     static let runtimeRoot = normalizedPath(ProcessInfo.processInfo.environment["COPYA_RUNTIME_ROOT"])
@@ -267,7 +267,7 @@ enum Config {
     }
     static var passwordSource: String { runtime.password_source }
     static var passwordEnvVar: String { runtime.password_env_var }
-    static let keychainService = "com.joshvera.copya"
+    static let keychainService = "com.freesidenyc.copya"
     static let keychainAccount = "kopia-password"
     static var passwordCommand: [String] { runtime.password_command }
     static var passwordReadTimeoutSeconds: Int { runtime.password_read_timeout_seconds }
@@ -6568,7 +6568,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
 }
 
 enum LaunchAgentManager {
-    static let plistName = "com.joshvera.copya.agent.plist"
+    static let plistName = "com.freesidenyc.copya.agent.plist"
 
     static var service: SMAppService {
         SMAppService.agent(plistName: plistName)
