@@ -1,9 +1,0 @@
-# Managed by pyinfra from group_data/all.py.
-# Patterns are relative to {{ backup_source }}.
-{% for entry in backup_tolerated_ephemeral_ignore_patterns -%}
-# {{ entry.reason }}
-{{ entry.pattern }}
-{% endfor %}
-{% for pattern in backup_ignore_patterns -%}
-{{ pattern }}
-{% endfor %}

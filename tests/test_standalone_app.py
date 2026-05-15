@@ -99,18 +99,80 @@ class StandaloneAppTest(unittest.TestCase):
         build_script = (ROOT / "scripts" / "build-app.sh").read_text()
         package_script = (ROOT / "scripts" / "package-dmg.sh").read_text()
         release_script = (ROOT / "scripts" / "release-dmg.sh").read_text()
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        lockfile = (ROOT / "uv.lock").read_text()
 
         self.assertIn("swift build", build_script)
         self.assertIn("Contents/Resources/bin/kopia", build_script)
         self.assertIn("codesign --verify --deep --strict", build_script)
         self.assertIn("hdiutil create", package_script)
+        self.assertIn("size_mb", package_script)
+        self.assertIn("ditto", package_script)
+        self.assertIn("hdiutil convert", package_script)
+        self.assertRegex(package_script, r"(?m)^detach_image\(\) \{")
+        self.assertRegex(package_script, r"(?m)^image_detached\(\) \{")
+        self.assertIn("hdiutil detach", package_script)
+        self.assertIn("-force", package_script)
+        self.assertIn("unable to detach", package_script)
+        self.assertIn("$work_dir", package_script)
+        self.assertNotIn("-srcfolder", package_script)
+        self.assertNotIn("hdiutil detach \"$mount_dir\" -quiet >/dev/null 2>&1 || true\n  rm -rf \"$work_dir\"", package_script)
         self.assertIn("notarytool submit", release_script)
         self.assertIn("xcrun stapler staple", release_script)
         self.assertIn("spctl --assess", release_script)
-        for forbidden in ["pyinfra", "jinja", "group_data/all.py"]:
-            self.assertNotIn(forbidden, build_script)
-            self.assertNotIn(forbidden, package_script)
-            self.assertNotIn(forbidden, release_script)
+        for forbidden_path in [
+            "deploy.py",
+            "inventory.py",
+            "group_data",
+            "templates",
+            "tests/test_copya_template.py",
+        ]:
+            self.assertFalse((ROOT / forbidden_path).exists(), forbidden_path)
+        for forbidden in ["pyinfra", "jinja", "group_data", "test_copya_template"]:
+            self.assertNotIn(forbidden, build_script.lower())
+            self.assertNotIn(forbidden, package_script.lower())
+            self.assertNotIn(forbidden, release_script.lower())
+            self.assertNotIn(forbidden, workflow.lower())
+            self.assertNotIn(forbidden, pyproject.lower())
+            self.assertNotIn(forbidden, lockfile.lower())
+
+    def test_package_dmg_helpers_handle_disk_state_edges(self) -> None:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                """
+source scripts/package-dmg.sh
+
+if [[ "$(normalize_tmp_parent "/tmp/")" != "/tmp" ]]; then
+  echo "expected trailing slash to be trimmed from /tmp/" >&2
+  exit 1
+fi
+
+if [[ "$(normalize_tmp_parent "/")" != "/" ]]; then
+  echo "expected root TMPDIR to stay root" >&2
+  exit 1
+fi
+
+if ! known_device_in_info "/dev/disk99" $'/dev/disk99 Apple_HFS COPYA\\n/dev/disk1 Apple_HFS Other'; then
+  echo "expected matching device to report attached" >&2
+  exit 1
+fi
+
+if known_device_in_info "/dev/disk99" $'/dev/disk1 Apple_HFS COPYA'; then
+  echo "expected absent device to report detached" >&2
+  exit 1
+fi
+""",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_build_uses_pinned_kopia_by_default(self) -> None:
         manifest = (ROOT / "release" / "kopia.env").read_text()
@@ -233,7 +295,9 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn("uses: astral-sh/setup-uv@", workflow)
         self.assertIn("scripts/release-tag-gate.sh", workflow)
         self.assertIn("scripts/oss-scan.sh", workflow)
-        self.assertIn("uv run python -m unittest tests/test_standalone_app.py tests/test_copya_template.py", workflow)
+        self.assertIn("uv run python -m unittest tests/test_standalone_app.py", workflow)
+        self.assertNotIn("tests/test_copya_template.py", workflow)
+        self.assertNotIn("group_data/example.py", workflow)
         self.assertIn("scripts/ci-import-codesign-cert.sh", workflow)
         self.assertIn("APPSTORE_CONNECT_API_KEY_P8_BASE64", workflow)
         self.assertIn("id: appstore-connect-key", workflow)

@@ -1,5 +1,3 @@
-group_data/all.py
-
 .venv/
 .build/
 __pycache__/
@@ -8,7 +6,6 @@ __pycache__/
 *.log
 *.app/
 *.dmg
-.pyinfra/
 
 status.json
 active-run.json
