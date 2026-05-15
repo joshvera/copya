@@ -4,20 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="${COPYA_APP_DIR:-"$ROOT_DIR/.build/app/COPYA.app"}"
 DMG_PATH="${COPYA_DMG_PATH:-"$ROOT_DIR/.build/COPYA.dmg"}"
-
-"$ROOT_DIR/scripts/build-app.sh"
-
-if [[ ! -d "$APP_DIR" ]]; then
-  echo "app bundle does not exist: $APP_DIR" >&2
-  exit 66
-fi
-
-tmp_parent="${TMPDIR:-/tmp}"
-tmp_parent="${tmp_parent%/}"
-work_dir="$(mktemp -d "$tmp_parent/copya-package-dmg.XXXXXX")"
-mount_dir="$work_dir/mount"
-canonical_mount_dir="$mount_dir"
-rw_dmg="$work_dir/COPYA-rw.dmg"
+work_dir=""
+mount_dir=""
+canonical_mount_dir=""
+rw_dmg=""
 attached_device=""
 
 current_mount_device() {
@@ -34,7 +24,13 @@ known_device_attached() {
     return 1
   fi
 
-  hdiutil info 2>/dev/null | awk -v device="$attached_device" \
+  local info_out
+  if ! info_out="$(hdiutil info 2>/dev/null)"; then
+    echo "warning: unable to query hdiutil info; assuming $attached_device is still attached" >&2
+    return 0
+  fi
+
+  printf '%s\n' "$info_out" | awk -v device="$attached_device" \
     '$1 == device { found = 1 } END { exit found ? 0 : 1 }'
 }
 
@@ -86,47 +82,70 @@ cleanup() {
   fi
   rm -rf "$work_dir"
 }
-trap cleanup EXIT
 
-mkdir -p "$mount_dir"
-canonical_mount_dir="$(cd "$(dirname "$mount_dir")" && pwd -P)/$(basename "$mount_dir")"
-rm -f "$DMG_PATH"
+main() {
+  "$ROOT_DIR/scripts/build-app.sh"
 
-app_kb="$(du -sk "$APP_DIR" | awk '{print $1}')"
-size_mb="$(( (app_kb + 1023) / 1024 + 128 ))"
-if (( size_mb < 256 )); then
-  size_mb=256
+  if [[ ! -d "$APP_DIR" ]]; then
+    echo "app bundle does not exist: $APP_DIR" >&2
+    exit 66
+  fi
+
+  local tmp_parent
+  tmp_parent="${TMPDIR:-/tmp}"
+  tmp_parent="${tmp_parent%/}"
+  work_dir="$(mktemp -d "$tmp_parent/copya-package-dmg.XXXXXX")"
+  mount_dir="$work_dir/mount"
+  canonical_mount_dir="$mount_dir"
+  rw_dmg="$work_dir/COPYA-rw.dmg"
+  attached_device=""
+  trap cleanup EXIT
+
+  mkdir -p "$mount_dir"
+  canonical_mount_dir="$(cd "$(dirname "$mount_dir")" && pwd -P)/$(basename "$mount_dir")"
+  rm -f "$DMG_PATH"
+
+  local app_kb size_mb attach_output
+  app_kb="$(du -sk "$APP_DIR" | awk '{print $1}')"
+  size_mb="$(( (app_kb + 1023) / 1024 + 128 ))"
+  if (( size_mb < 256 )); then
+    size_mb=256
+  fi
+
+  hdiutil create \
+    -size "${size_mb}m" \
+    -fs HFS+ \
+    -volname "COPYA" \
+    -ov \
+    "$rw_dmg" >/dev/null
+
+  attach_output="$(hdiutil attach "$rw_dmg" \
+    -mountpoint "$mount_dir" \
+    -nobrowse)"
+
+  attached_device="$(current_mount_device)"
+  if [[ -z "$attached_device" ]]; then
+    attached_device="$(printf '%s\n' "$attach_output" | awk -v raw_mount_dir="$mount_dir" -v canonical_mount_dir="$canonical_mount_dir" \
+      'index($0, raw_mount_dir) || index($0, canonical_mount_dir) { print $1; exit }')"
+  fi
+  if [[ -z "$attached_device" ]]; then
+    echo "unable to identify attached device for $mount_dir" >&2
+    exit 1
+  fi
+
+  ditto "$APP_DIR" "$mount_dir/COPYA.app"
+  if ! detach_image; then
+    echo "unable to detach $attached_device at $mount_dir" >&2
+    exit 1
+  fi
+
+  hdiutil convert "$rw_dmg" \
+    -format UDZO \
+    -o "$DMG_PATH" >/dev/null
+
+  echo "$DMG_PATH"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-hdiutil create \
-  -size "${size_mb}m" \
-  -fs HFS+ \
-  -volname "COPYA" \
-  -ov \
-  "$rw_dmg" >/dev/null
-
-attach_output="$(hdiutil attach "$rw_dmg" \
-  -mountpoint "$mount_dir" \
-  -nobrowse)"
-
-attached_device="$(current_mount_device)"
-if [[ -z "$attached_device" ]]; then
-  attached_device="$(printf '%s\n' "$attach_output" | awk -v raw_mount_dir="$mount_dir" -v canonical_mount_dir="$canonical_mount_dir" \
-    'index($0, raw_mount_dir) || index($0, canonical_mount_dir) { print $1; exit }')"
-fi
-if [[ -z "$attached_device" ]]; then
-  echo "unable to identify attached device for $mount_dir" >&2
-  exit 1
-fi
-
-ditto "$APP_DIR" "$mount_dir/COPYA.app"
-if ! detach_image; then
-  echo "unable to detach $attached_device at $mount_dir" >&2
-  exit 1
-fi
-
-hdiutil convert "$rw_dmg" \
-  -format UDZO \
-  -o "$DMG_PATH" >/dev/null
-
-echo "$DMG_PATH"
