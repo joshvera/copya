@@ -16,15 +16,63 @@ tmp_parent="${TMPDIR:-/tmp}"
 tmp_parent="${tmp_parent%/}"
 work_dir="$(mktemp -d "$tmp_parent/copya-package-dmg.XXXXXX")"
 mount_dir="$work_dir/mount"
+canonical_mount_dir="$mount_dir"
 rw_dmg="$work_dir/COPYA-rw.dmg"
+attached_device=""
+
+current_mount_device() {
+  mount | awk -v raw_mount_dir="$mount_dir" -v canonical_mount_dir="$canonical_mount_dir" \
+    '$2 == "on" && ($3 == raw_mount_dir || $3 == canonical_mount_dir) { print $1; exit }'
+}
+
+is_mount_attached() {
+  [[ -n "$(current_mount_device)" ]]
+}
+
+detach_image() {
+  local device
+  device="$(current_mount_device)"
+  if [[ -z "$device" ]]; then
+    attached_device=""
+    return 0
+  fi
+
+  local target
+  for target in "${attached_device:-}" "$device" "$canonical_mount_dir"; do
+    if [[ -z "$target" ]]; then
+      continue
+    fi
+
+    for _ in 1 2 3; do
+      hdiutil detach "$target" -quiet >/dev/null 2>&1 || true
+      if ! is_mount_attached; then
+        attached_device=""
+        return 0
+      fi
+      sleep 1
+    done
+
+    hdiutil detach "$target" -force -quiet >/dev/null 2>&1 || true
+    if ! is_mount_attached; then
+      attached_device=""
+      return 0
+    fi
+  done
+
+  return 1
+}
 
 cleanup() {
-  hdiutil detach "$mount_dir" -quiet >/dev/null 2>&1 || true
+  if is_mount_attached && ! detach_image; then
+    echo "warning: unable to detach $mount_dir; leaving $work_dir for manual cleanup" >&2
+    return 0
+  fi
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
 
 mkdir -p "$mount_dir"
+canonical_mount_dir="$(cd "$(dirname "$mount_dir")" && pwd -P)/$(basename "$mount_dir")"
 rm -f "$DMG_PATH"
 
 app_kb="$(du -sk "$APP_DIR" | awk '{print $1}')"
@@ -40,13 +88,25 @@ hdiutil create \
   -ov \
   "$rw_dmg" >/dev/null
 
-hdiutil attach "$rw_dmg" \
+attach_output="$(hdiutil attach "$rw_dmg" \
   -mountpoint "$mount_dir" \
-  -nobrowse \
-  -quiet
+  -nobrowse)"
+
+attached_device="$(current_mount_device)"
+if [[ -z "$attached_device" ]]; then
+  attached_device="$(printf '%s\n' "$attach_output" | awk -v raw_mount_dir="$mount_dir" -v canonical_mount_dir="$canonical_mount_dir" \
+    'index($0, raw_mount_dir) || index($0, canonical_mount_dir) { print $1; exit }')"
+fi
+if [[ -z "$attached_device" ]]; then
+  echo "unable to identify attached device for $mount_dir" >&2
+  exit 1
+fi
 
 ditto "$APP_DIR" "$mount_dir/COPYA.app"
-hdiutil detach "$mount_dir" -quiet
+if ! detach_image; then
+  echo "unable to detach $attached_device at $mount_dir" >&2
+  exit 1
+fi
 
 hdiutil convert "$rw_dmg" \
   -format UDZO \
