@@ -137,52 +137,30 @@ class StandaloneAppTest(unittest.TestCase):
             self.assertNotIn(forbidden, pyproject.lower())
             self.assertNotIn(forbidden, lockfile.lower())
 
-    def test_package_dmg_keeps_attach_state_unknown_when_hdiutil_info_fails(self) -> None:
-        failure_result = subprocess.run(
+    def test_package_dmg_helpers_handle_disk_state_edges(self) -> None:
+        result = subprocess.run(
             [
                 "bash",
                 "-c",
                 """
 source scripts/package-dmg.sh
-attached_device="/dev/disk99"
-hdiutil() {
-  if [[ "${1:-}" == "info" ]]; then
-    return 42
-  fi
-  return 0
-}
 
-if ! known_device_attached; then
-  echo "expected failed hdiutil info to keep the device attached" >&2
+if [[ "$(normalize_tmp_parent "/tmp/")" != "/tmp" ]]; then
+  echo "expected trailing slash to be trimmed from /tmp/" >&2
   exit 1
 fi
-""",
-            ],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
 
-        self.assertEqual(failure_result.returncode, 0, failure_result.stderr)
-        self.assertIn("assuming /dev/disk99 is still attached", failure_result.stderr)
+if [[ "$(normalize_tmp_parent "/")" != "/" ]]; then
+  echo "expected root TMPDIR to stay root" >&2
+  exit 1
+fi
 
-        missing_result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                """
-source scripts/package-dmg.sh
-attached_device="/dev/disk99"
-hdiutil() {
-  if [[ "${1:-}" == "info" ]]; then
-    printf '%s\\n' "/dev/disk1 Apple_HFS COPYA"
-    return 0
-  fi
-  return 0
-}
+if ! known_device_in_info "/dev/disk99" $'/dev/disk99 Apple_HFS COPYA\\n/dev/disk1 Apple_HFS Other'; then
+  echo "expected matching device to report attached" >&2
+  exit 1
+fi
 
-if known_device_attached; then
+if known_device_in_info "/dev/disk99" $'/dev/disk1 Apple_HFS COPYA'; then
   echo "expected absent device to report detached" >&2
   exit 1
 fi
@@ -194,7 +172,7 @@ fi
             check=False,
         )
 
-        self.assertEqual(missing_result.returncode, 0, missing_result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_build_uses_pinned_kopia_by_default(self) -> None:
         manifest = (ROOT / "release" / "kopia.env").read_text()

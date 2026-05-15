@@ -19,6 +19,18 @@ is_mount_attached() {
   [[ -n "$(current_mount_device)" ]]
 }
 
+known_device_in_info() {
+  local device="$1"
+  local info_out="$2"
+
+  if [[ -z "$device" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "$info_out" | awk -v device="$device" \
+    '$1 == device { found = 1 } END { exit found ? 0 : 1 }'
+}
+
 known_device_attached() {
   if [[ -z "${attached_device:-}" ]]; then
     return 1
@@ -30,8 +42,7 @@ known_device_attached() {
     return 0
   fi
 
-  printf '%s\n' "$info_out" | awk -v device="$attached_device" \
-    '$1 == device { found = 1 } END { exit found ? 0 : 1 }'
+  known_device_in_info "$attached_device" "$info_out"
 }
 
 image_detached() {
@@ -83,6 +94,15 @@ cleanup() {
   rm -rf "$work_dir"
 }
 
+normalize_tmp_parent() {
+  local tmp_parent="${1:-/tmp}"
+  tmp_parent="${tmp_parent%/}"
+  if [[ -z "$tmp_parent" ]]; then
+    tmp_parent="/"
+  fi
+  printf '%s\n' "$tmp_parent"
+}
+
 main() {
   "$ROOT_DIR/scripts/build-app.sh"
 
@@ -92,8 +112,7 @@ main() {
   fi
 
   local tmp_parent
-  tmp_parent="${TMPDIR:-/tmp}"
-  tmp_parent="${tmp_parent%/}"
+  tmp_parent="$(normalize_tmp_parent "${TMPDIR:-/tmp}")"
   work_dir="$(mktemp -d "$tmp_parent/copya-package-dmg.XXXXXX")"
   mount_dir="$work_dir/mount"
   canonical_mount_dir="$mount_dir"
