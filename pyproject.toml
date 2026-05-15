@@ -1,8 +1,6 @@
 [project]
-name = "kopia-mac-pyinfra"
+name = "copya"
 version = "0.1.0"
-description = "Pyinfra deploy for native macOS Kopia backups"
+description = "Standalone native macOS COPYA app checks"
 requires-python = ">=3.11"
-dependencies = [
-    "pyinfra>=3,<4",
-]
+dependencies = []

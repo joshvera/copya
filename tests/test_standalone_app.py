@@ -99,18 +99,36 @@ class StandaloneAppTest(unittest.TestCase):
         build_script = (ROOT / "scripts" / "build-app.sh").read_text()
         package_script = (ROOT / "scripts" / "package-dmg.sh").read_text()
         release_script = (ROOT / "scripts" / "release-dmg.sh").read_text()
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        lockfile = (ROOT / "uv.lock").read_text()
 
         self.assertIn("swift build", build_script)
         self.assertIn("Contents/Resources/bin/kopia", build_script)
         self.assertIn("codesign --verify --deep --strict", build_script)
         self.assertIn("hdiutil create", package_script)
+        self.assertIn("size_mb", package_script)
+        self.assertIn("ditto", package_script)
+        self.assertIn("hdiutil convert", package_script)
+        self.assertNotIn("-srcfolder", package_script)
         self.assertIn("notarytool submit", release_script)
         self.assertIn("xcrun stapler staple", release_script)
         self.assertIn("spctl --assess", release_script)
-        for forbidden in ["pyinfra", "jinja", "group_data/all.py"]:
-            self.assertNotIn(forbidden, build_script)
-            self.assertNotIn(forbidden, package_script)
-            self.assertNotIn(forbidden, release_script)
+        for forbidden_path in [
+            "deploy.py",
+            "inventory.py",
+            "group_data",
+            "templates",
+            "tests/test_copya_template.py",
+        ]:
+            self.assertFalse((ROOT / forbidden_path).exists(), forbidden_path)
+        for forbidden in ["pyinfra", "jinja", "group_data", "test_copya_template"]:
+            self.assertNotIn(forbidden, build_script.lower())
+            self.assertNotIn(forbidden, package_script.lower())
+            self.assertNotIn(forbidden, release_script.lower())
+            self.assertNotIn(forbidden, workflow.lower())
+            self.assertNotIn(forbidden, pyproject.lower())
+            self.assertNotIn(forbidden, lockfile.lower())
 
     def test_build_uses_pinned_kopia_by_default(self) -> None:
         manifest = (ROOT / "release" / "kopia.env").read_text()
@@ -233,7 +251,9 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn("uses: astral-sh/setup-uv@", workflow)
         self.assertIn("scripts/release-tag-gate.sh", workflow)
         self.assertIn("scripts/oss-scan.sh", workflow)
-        self.assertIn("uv run python -m unittest tests/test_standalone_app.py tests/test_copya_template.py", workflow)
+        self.assertIn("uv run python -m unittest tests/test_standalone_app.py", workflow)
+        self.assertNotIn("tests/test_copya_template.py", workflow)
+        self.assertNotIn("group_data/example.py", workflow)
         self.assertIn("scripts/ci-import-codesign-cert.sh", workflow)
         self.assertIn("APPSTORE_CONNECT_API_KEY_P8_BASE64", workflow)
         self.assertIn("id: appstore-connect-key", workflow)
