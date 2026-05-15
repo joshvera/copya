@@ -29,23 +29,35 @@ is_mount_attached() {
   [[ -n "$(current_mount_device)" ]]
 }
 
+known_device_attached() {
+  if [[ -z "${attached_device:-}" ]]; then
+    return 1
+  fi
+
+  hdiutil info 2>/dev/null | awk -v device="$attached_device" \
+    '$1 == device { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+image_detached() {
+  ! is_mount_attached && ! known_device_attached
+}
+
 detach_image() {
   local device
   device="$(current_mount_device)"
-  if [[ -z "$device" ]]; then
-    attached_device=""
+  if [[ -z "$device" && -z "${attached_device:-}" ]]; then
     return 0
   fi
 
   local target
-  for target in "${attached_device:-}" "$device" "$canonical_mount_dir"; do
+  for target in "${attached_device:-}" "$device" "$canonical_mount_dir" "$mount_dir"; do
     if [[ -z "$target" ]]; then
       continue
     fi
 
     for _ in 1 2 3; do
       hdiutil detach "$target" -quiet >/dev/null 2>&1 || true
-      if ! is_mount_attached; then
+      if image_detached; then
         attached_device=""
         return 0
       fi
@@ -53,17 +65,22 @@ detach_image() {
     done
 
     hdiutil detach "$target" -force -quiet >/dev/null 2>&1 || true
-    if ! is_mount_attached; then
+    if image_detached; then
       attached_device=""
       return 0
     fi
   done
 
+  if image_detached; then
+    attached_device=""
+    return 0
+  fi
+
   return 1
 }
 
 cleanup() {
-  if is_mount_attached && ! detach_image; then
+  if ! detach_image; then
     echo "warning: unable to detach $mount_dir; leaving $work_dir for manual cleanup" >&2
     return 0
   fi
