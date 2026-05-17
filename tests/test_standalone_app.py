@@ -1,6 +1,8 @@
-import plistlib
+import json
 import os
+import plistlib
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +11,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StandaloneAppTest(unittest.TestCase):
+    _copya_binary = None
+
+    @classmethod
+    def copya_binary(cls) -> Path:
+        if cls._copya_binary is None:
+            subprocess.run(
+                ["swift", "build", "--product", "COPYA"],
+                cwd=ROOT,
+                check=True,
+            )
+            bin_dir = subprocess.run(
+                ["swift", "build", "--show-bin-path"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            cls._copya_binary = Path(bin_dir) / "COPYA"
+        return cls._copya_binary
+
+    def run_config_json(self, config_path: Path) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as runtime_root:
+            return subprocess.run(
+                [str(self.copya_binary()), "--config-json"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "COPYA_CONFIG_FILE": str(config_path),
+                    "COPYA_RUNTIME_ROOT": runtime_root,
+                },
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
     def test_native_swift_source_is_not_a_jinja_template(self) -> None:
         source = (ROOT / "Sources" / "COPYA" / "COPYA.swift").read_text()
         setup_source = (ROOT / "Sources" / "COPYA" / "SetupPreferencesView.swift").read_text()
@@ -33,6 +70,21 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn('password_source: "keychain"', source)
         self.assertIn("struct RuntimeConfig", source)
         self.assertIn("struct RuntimeConfigOverrides", source)
+        self.assertIn("ephemeral_exclude_patterns", source)
+        self.assertIn('legacyEphemeralExcludePatternsKey = "backup_tolerated_ephemeral_ignore_patterns"', source)
+        self.assertIn("open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL", source)
+        self.assertIn("rename(temporaryURL.path, url.path)", source)
+        self.assertNotIn("data.write(to: temporaryURL)", source)
+        self.assertIn("let targetPermissions = migratedConfigPermissions", source)
+        self.assertIn("let temporaryPermissions: UInt16 = 0o600", source)
+        self.assertIn("fchmod(descriptor, mode_t(targetPermissions))", source)
+        self.assertLess(
+            source.index("fchmod(descriptor, mode_t(targetPermissions))"),
+            source.index("rename(temporaryURL.path, url.path)"),
+        )
+        self.assertNotIn("chmod(url.path, mode_t(targetPermissions))", source)
+        self.assertIn("permissions & 0o600", source)
+        self.assertIn("ownerPermissions | 0o400", source)
         self.assertIn('static let configFile = explicitConfigFile ?? "\\(appSupportDir)/config.json"', source)
         self.assertIn("network_policy_enabled", source)
         self.assertIn("kopia_config_file", source)
@@ -78,6 +130,136 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertNotIn("{{", source)
         self.assertNotIn("{%", source)
         self.assertNotIn("/Users/example", source)
+
+    def test_config_json_migrates_legacy_ephemeral_exclude_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Legacy/*"],
+                        "unknown_object": {"preserve": True},
+                    }
+                )
+            )
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            migrated = json.loads(config_path.read_text())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/Legacy/*"])
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", parsed)
+        self.assertEqual(migrated["ephemeral_exclude_patterns"], ["/Legacy/*"])
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", migrated)
+        self.assertEqual(migrated["unknown_object"], {"preserve": True})
+
+    def test_config_json_canonical_ephemeral_exclude_key_wins_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "ephemeral_exclude_patterns": ["/New/*"],
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Old/*"],
+                    }
+                )
+            )
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            migrated = json.loads(config_path.read_text())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/New/*"])
+        self.assertEqual(migrated["ephemeral_exclude_patterns"], ["/New/*"])
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", migrated)
+
+    def test_config_json_migrates_empty_legacy_ephemeral_exclude_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": [],
+                    }
+                )
+            )
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            migrated = json.loads(config_path.read_text())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], [])
+        self.assertEqual(migrated["ephemeral_exclude_patterns"], [])
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", migrated)
+
+    def test_config_json_migration_clamps_permissive_config_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Legacy/*"],
+                    }
+                )
+            )
+            config_path.chmod(0o644)
+
+            result = self.run_config_json(config_path)
+            mode = config_path.stat().st_mode & 0o777
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(mode, 0o600)
+
+    def test_config_json_migration_preserves_private_read_only_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Legacy/*"],
+                    }
+                )
+            )
+            config_path.chmod(0o400)
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            mode = config_path.stat().st_mode & 0o777
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/Legacy/*"])
+        self.assertEqual(mode, 0o400)
+
+    def test_config_json_does_not_rewrite_symlinked_legacy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_path = Path(tmpdir) / "target.json"
+            config_path = Path(tmpdir) / "config-link.json"
+            target_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Linked/*"],
+                    }
+                )
+            )
+            config_path.symlink_to(target_path)
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            target = json.loads(target_path.read_text())
+
+        self.assertIn("symlink", result.stderr)
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/Linked/*"])
+        self.assertEqual(target["backup_tolerated_ephemeral_ignore_patterns"], ["/Linked/*"])
+        self.assertNotIn("ephemeral_exclude_patterns", target)
 
     def test_app_bundle_resources_are_valid_plists(self) -> None:
         info = plistlib.loads((ROOT / "Resources" / "Info.plist").read_bytes())

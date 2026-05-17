@@ -91,7 +91,7 @@ cat > "$config_file" <<JSON
 {
   "backup_source": "$source_dir",
   "backup_ignore_patterns": [],
-  "backup_tolerated_ephemeral_ignore_patterns": [],
+  "ephemeral_exclude_patterns": [],
   "protected_data_probe_paths": ["$source_dir"],
   "cloud_materialization_roots": [],
   "cloud_materialization_enabled": false,
