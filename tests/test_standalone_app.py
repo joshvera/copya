@@ -73,7 +73,9 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn("ephemeral_exclude_patterns", source)
         self.assertIn('legacyEphemeralExcludePatternsKey = "backup_tolerated_ephemeral_ignore_patterns"', source)
         self.assertIn("open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL", source)
+        self.assertIn("rename(temporaryURL.path, url.path)", source)
         self.assertNotIn("data.write(to: temporaryURL)", source)
+        self.assertIn("let permissions: UInt16 = 0o600", source)
         self.assertIn('static let configFile = explicitConfigFile ?? "\\(appSupportDir)/config.json"', source)
         self.assertIn("network_policy_enabled", source)
         self.assertIn("kopia_config_file", source)
@@ -204,6 +206,27 @@ class StandaloneAppTest(unittest.TestCase):
             mode = config_path.stat().st_mode & 0o777
 
         self.assertEqual(result.stderr, "")
+        self.assertEqual(mode, 0o600)
+
+    def test_config_json_migration_normalizes_private_read_only_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": ["/Legacy/*"],
+                    }
+                )
+            )
+            config_path.chmod(0o400)
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            mode = config_path.stat().st_mode & 0o777
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/Legacy/*"])
         self.assertEqual(mode, 0o600)
 
     def test_config_json_does_not_rewrite_symlinked_legacy_config(self) -> None:

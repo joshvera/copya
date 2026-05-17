@@ -161,9 +161,7 @@ struct RuntimeConfig: Codable {
 
         let url = URL(fileURLWithPath: path)
         let directory = url.deletingLastPathComponent()
-        let attributes = try? fileManager.attributesOfItem(atPath: path)
-        let existingPermissions = (attributes?[.posixPermissions] as? NSNumber)?.uint16Value
-        let permissions = existingPermissions.map { $0 & 0o600 } ?? 0o600
+        let permissions: UInt16 = 0o600
         let temporaryURL = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
 
         do {
@@ -175,10 +173,8 @@ struct RuntimeConfig: Codable {
             let temporaryFile = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             try temporaryFile.write(contentsOf: data)
             try temporaryFile.close()
-            if fileManager.fileExists(atPath: path) {
-                _ = try fileManager.replaceItemAt(url, withItemAt: temporaryURL)
-            } else {
-                try fileManager.moveItem(at: temporaryURL, to: url)
+            if rename(temporaryURL.path, url.path) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             chmod(url.path, mode_t(permissions))
         } catch {
