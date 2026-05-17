@@ -161,12 +161,15 @@ struct RuntimeConfig: Codable {
 
         let url = URL(fileURLWithPath: path)
         let directory = url.deletingLastPathComponent()
-        let permissions: UInt16 = 0o600
+        let targetPermissions = migratedConfigPermissions(
+            from: try? fileManager.attributesOfItem(atPath: path)
+        )
+        let temporaryPermissions: UInt16 = 0o600
         let temporaryURL = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
 
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            let descriptor = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(permissions))
+            let descriptor = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(temporaryPermissions))
             guard descriptor >= 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
@@ -176,11 +179,30 @@ struct RuntimeConfig: Codable {
             if rename(temporaryURL.path, url.path) != 0 {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            chmod(url.path, mode_t(permissions))
+            if chmod(url.path, mode_t(targetPermissions)) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
         } catch {
             try? fileManager.removeItem(at: temporaryURL)
             fputs("warning: unable to persist migrated COPYA config at \(path): \(error)\n", stderr)
         }
+    }
+
+    private static func migratedConfigPermissions(from attributes: [FileAttributeKey: Any]?) -> UInt16 {
+        guard let permissions = (attributes?[.posixPermissions] as? NSNumber)?.uint16Value else {
+            return 0o600
+        }
+
+        let ownerPermissions = permissions & 0o600
+        guard ownerPermissions != 0 else {
+            return 0o400
+        }
+
+        if ownerPermissions & 0o400 == 0 {
+            return ownerPermissions | 0o400
+        }
+
+        return ownerPermissions
     }
 
     func validated(fallback: RuntimeConfig) -> RuntimeConfig {

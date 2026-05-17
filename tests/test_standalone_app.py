@@ -75,7 +75,11 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn("open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL", source)
         self.assertIn("rename(temporaryURL.path, url.path)", source)
         self.assertNotIn("data.write(to: temporaryURL)", source)
-        self.assertIn("let permissions: UInt16 = 0o600", source)
+        self.assertIn("let targetPermissions = migratedConfigPermissions", source)
+        self.assertIn("let temporaryPermissions: UInt16 = 0o600", source)
+        self.assertIn("chmod(url.path, mode_t(targetPermissions))", source)
+        self.assertIn("permissions & 0o600", source)
+        self.assertIn("ownerPermissions | 0o400", source)
         self.assertIn('static let configFile = explicitConfigFile ?? "\\(appSupportDir)/config.json"', source)
         self.assertIn("network_policy_enabled", source)
         self.assertIn("kopia_config_file", source)
@@ -208,7 +212,7 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(mode, 0o600)
 
-    def test_config_json_migration_normalizes_private_read_only_config(self) -> None:
+    def test_config_json_migration_preserves_private_read_only_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             config_path.write_text(
@@ -227,7 +231,7 @@ class StandaloneAppTest(unittest.TestCase):
 
         self.assertEqual(result.stderr, "")
         self.assertEqual(parsed["ephemeral_exclude_patterns"], ["/Legacy/*"])
-        self.assertEqual(mode, 0o600)
+        self.assertEqual(mode, 0o400)
 
     def test_config_json_does_not_rewrite_symlinked_legacy_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
