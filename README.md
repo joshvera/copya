@@ -55,8 +55,8 @@ To create a local DMG:
 scripts/package-dmg.sh
 ```
 
-The build script is intentionally pyinfra-free and Jinja-free. It compiles the
-native Swift source with SwiftPM, builds the app bundle, copies the bundled
+The build script is standalone. It compiles the native Swift source with
+SwiftPM, builds the app bundle, copies the bundled
 LaunchAgent plist into `Contents/Library/LaunchAgents`, downloads the pinned
 Kopia release from `release/kopia.env`, verifies its SHA-256, bundles it under
 `Contents/Resources/bin/kopia`, includes Kopia license/notice files, and
@@ -128,10 +128,6 @@ The workflow imports the Developer ID certificate into a temporary keychain,
 uses an App Store Connect API key for notarization, installs the notarized DMG,
 creates a temporary filesystem Kopia repository, runs `COPYA --backup-once`, and
 restores one fixture file. It does not use B2 or production Kopia credentials.
-
-Do not remove the legacy pyinfra/Jinja fallback until a notarized DMG has passed
-a clean install, backup smoke, and bounded restore smoke on a machine that did
-not already have the old installer path set up.
 
 ## Install And Start At Login
 
@@ -221,9 +217,9 @@ COPYA_CONFIG_FILE=/tmp/copya-config.json \
 `COPYA_RUNTIME_ROOT` moves COPYA support/cache/log/status/active-run paths and
 the child Kopia `HOME`. `COPYA_CONFIG_FILE` points at an explicit runtime config;
 if that explicit config is missing, unreadable, or invalid JSON, COPYA exits
-instead of falling back to the real home directory. For isolated smoke tests, set `network_policy_enabled`
-and `cloud_materialization_enabled` to `false`, use `password_source:
-"environment"`, and provide `kopia_config_file`.
+instead of falling back to the real home directory. For isolated smoke tests,
+set `network_policy_enabled` and `cloud_materialization_enabled` to `false`,
+use `"password_source": "environment"`, and provide `"kopia_config_file"`.
 
 ## Password Sources
 
@@ -238,18 +234,28 @@ printf '%s' 'your-kopia-repository-password' \
   | "/Applications/COPYA.app/Contents/MacOS/COPYA" --store-password-in-keychain
 ```
 
-The legacy pyinfra path and isolated CI smoke tests also support environment, command, and 1Password
-sources through `group_data/all.py`:
+Isolated CI smoke tests and advanced runtime configs also support environment,
+command, and 1Password sources through `config.json`:
 
-```python
-password_source = "environment"
-password_env_var = "KOPIA_PASSWORD"
+```json
+{
+  "password_source": "environment",
+  "password_env_var": "KOPIA_PASSWORD"
+}
+```
 
-password_source = "command"
-password_command = ["/path/to/read-password"]
+```json
+{
+  "password_source": "command",
+  "password_command": ["/path/to/read-password"]
+}
+```
 
-password_source = "onepassword"
-kopia_password_ref = "op://Vault/Item/field"
+```json
+{
+  "password_source": "onepassword",
+  "kopia_password_ref": "op://Vault/Item/field"
+}
 ```
 
 For unattended launchd runs, make sure the chosen source works without manual
@@ -268,24 +274,6 @@ Backblaze application key ID, application key, optional prefix, and choose
 
 COPYA does not create cloud-provider accounts, buckets, or Backblaze application
 keys for you. Some chores still require a human with buttons and consequences.
-
-## Legacy Pyinfra Deploy
-
-The old reproducible installer is retained temporarily while standalone parity
-is being proven:
-
-```bash
-uv run pyinfra @local deploy.py --dry
-uv run pyinfra @local deploy.py
-```
-
-Deploy does not use `pyinfra.operations.launchd.service`; it uses modern
-per-user `launchctl gui/$(id -u)` bootstrap, enable, and kickstart commands.
-
-It still uses `group_data/all.py`, Homebrew, pyinfra, and Jinja templates. Do
-not treat that as the public install path going forward. The deletion gate is a
-notarized standalone DMG with no terminal-only setup requirement for a first-time
-user.
 
 ## Permissions
 
@@ -364,13 +352,12 @@ Before publishing:
 
 ```bash
 scripts/oss-scan.sh
-python3 -m py_compile deploy.py group_data/all.py tests/test_copya_template.py tests/test_standalone_app.py
-uv run python -m unittest tests/test_copya_template.py tests/test_standalone_app.py
+python3 -m py_compile tests/test_standalone_app.py
+uv run python -m unittest tests/test_standalone_app.py
 swift build -c debug --product COPYA
 scripts/build-app.sh
 scripts/package-dmg.sh
 bash -n scripts/build-app.sh scripts/package-dmg.sh scripts/release-dmg.sh scripts/restore-smoke.sh scripts/ci-import-codesign-cert.sh scripts/release-tag-gate.sh scripts/release-smoke.sh
-uv run pyinfra @local deploy.py --dry
 git diff --check
 ```
 

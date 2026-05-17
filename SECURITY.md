@@ -9,9 +9,9 @@ COPYA must never commit, log, or write the Kopia repository password to status
 JSON. The password should only be passed as `KOPIA_PASSWORD` to the Kopia child
 process.
 
-Supported password sources are environment variable, command, and 1Password
-secret reference. Local secret references belong in ignored `group_data/all.py`,
-not committed files.
+Supported password sources are Keychain, environment variable, command, and
+1Password secret reference. Local secret references belong in user runtime
+config, not committed files.
 
 ## Permissions
 
