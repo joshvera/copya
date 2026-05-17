@@ -77,7 +77,12 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertNotIn("data.write(to: temporaryURL)", source)
         self.assertIn("let targetPermissions = migratedConfigPermissions", source)
         self.assertIn("let temporaryPermissions: UInt16 = 0o600", source)
-        self.assertIn("chmod(url.path, mode_t(targetPermissions))", source)
+        self.assertIn("fchmod(descriptor, mode_t(targetPermissions))", source)
+        self.assertLess(
+            source.index("fchmod(descriptor, mode_t(targetPermissions))"),
+            source.index("rename(temporaryURL.path, url.path)"),
+        )
+        self.assertNotIn("chmod(url.path, mode_t(targetPermissions))", source)
         self.assertIn("permissions & 0o600", source)
         self.assertIn("ownerPermissions | 0o400", source)
         self.assertIn('static let configFile = explicitConfigFile ?? "\\(appSupportDir)/config.json"', source)

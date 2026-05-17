@@ -175,11 +175,11 @@ struct RuntimeConfig: Codable {
             }
             let temporaryFile = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             try temporaryFile.write(contentsOf: data)
-            try temporaryFile.close()
-            if rename(temporaryURL.path, url.path) != 0 {
+            if fchmod(descriptor, mode_t(targetPermissions)) != 0 {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            if chmod(url.path, mode_t(targetPermissions)) != 0 {
+            try temporaryFile.close()
+            if rename(temporaryURL.path, url.path) != 0 {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
         } catch {
