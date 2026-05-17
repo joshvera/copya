@@ -10,9 +10,12 @@ import ServiceManagement
 import SwiftUI
 
 struct RuntimeConfig: Codable {
+    private static let ephemeralExcludePatternsKey = "ephemeral_exclude_patterns"
+    private static let legacyEphemeralExcludePatternsKey = "backup_tolerated_ephemeral_ignore_patterns"
+
     var backup_source: String
     var backup_ignore_patterns: [String]
-    var backup_tolerated_ephemeral_ignore_patterns: [String]
+    var ephemeral_exclude_patterns: [String]
     var protected_data_probe_paths: [String]
     var cloud_materialization_roots: [String]
     var cloud_materialization_enabled: Bool
@@ -36,10 +39,10 @@ struct RuntimeConfig: Codable {
     var limited_backup_acknowledged: Bool
 
     static func defaults(home: String) -> RuntimeConfig {
-        RuntimeConfig(
+        return RuntimeConfig(
             backup_source: home,
             backup_ignore_patterns: [],
-            backup_tolerated_ephemeral_ignore_patterns: [
+            ephemeral_exclude_patterns: [
                 "/Library/Metadata/CoreSpotlight/*",
                 "/Library/Application Support/FileProvider/*/wharf/tombstone/*",
                 "/Library/DuetExpertCenter/*",
@@ -48,6 +51,7 @@ struct RuntimeConfig: Codable {
                 "/Library/Daemon Containers/*/Data/com.apple.milod/*",
                 "/Library/Group Containers/group.com.apple.secure-control-center-preferences/*",
                 "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
+                "/OrbStack/docker/images/*",
             ],
             protected_data_probe_paths: [
                 "\(home)/Desktop",
@@ -102,8 +106,9 @@ struct RuntimeConfig: Codable {
             }
             return defaults
         }
+        let configData = migrateLegacyEphemeralExcludePatterns(in: data, path: path)
         do {
-            let overrides = try JSONDecoder().decode(RuntimeConfigOverrides.self, from: data)
+            let overrides = try JSONDecoder().decode(RuntimeConfigOverrides.self, from: configData)
             return overrides.apply(to: defaults).validated(fallback: defaults)
         } catch {
             if requireValid {
@@ -111,6 +116,68 @@ struct RuntimeConfig: Codable {
                 exit(78)
             }
             return defaults
+        }
+    }
+
+    private static func migrateLegacyEphemeralExcludePatterns(in data: Data, path: String) -> Data {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              object.keys.contains(legacyEphemeralExcludePatternsKey) else {
+            return data
+        }
+
+        if object[ephemeralExcludePatternsKey] == nil {
+            object[ephemeralExcludePatternsKey] = object[legacyEphemeralExcludePatternsKey]
+        }
+        object.removeValue(forKey: legacyEphemeralExcludePatternsKey)
+
+        guard JSONSerialization.isValidJSONObject(object) else {
+            return data
+        }
+
+        do {
+            var migratedData = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            migratedData.append(contentsOf: [0x0a])
+            persistMigratedConfigData(migratedData, path: path)
+            return migratedData
+        } catch {
+            let message = "warning: unable to migrate COPYA config at \(path) " +
+                "from \(legacyEphemeralExcludePatternsKey) to \(ephemeralExcludePatternsKey): \(error)\n"
+            fputs(message, stderr)
+            return data
+        }
+    }
+
+    private static func persistMigratedConfigData(_ data: Data, path: String) {
+        let fileManager = FileManager.default
+        if (try? fileManager.destinationOfSymbolicLink(atPath: path)) != nil {
+            let message = "warning: COPYA config at \(path) is a symlink; " +
+                "not rewriting legacy \(legacyEphemeralExcludePatternsKey) to \(ephemeralExcludePatternsKey)\n"
+            fputs(message, stderr)
+            return
+        }
+
+        let url = URL(fileURLWithPath: path)
+        let directory = url.deletingLastPathComponent()
+        let attributes = try? fileManager.attributesOfItem(atPath: path)
+        let permissions = (attributes?[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o600
+        let temporaryURL = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: temporaryURL)
+            chmod(temporaryURL.path, mode_t(permissions))
+            if fileManager.fileExists(atPath: path) {
+                _ = try fileManager.replaceItemAt(url, withItemAt: temporaryURL)
+            } else {
+                try fileManager.moveItem(at: temporaryURL, to: url)
+            }
+            chmod(url.path, mode_t(permissions))
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            fputs("warning: unable to persist migrated COPYA config at \(path): \(error)\n", stderr)
         }
     }
 
@@ -150,6 +217,7 @@ struct RuntimeConfig: Codable {
 struct RuntimeConfigOverrides: Decodable {
     var backup_source: String?
     var backup_ignore_patterns: [String]?
+    var ephemeral_exclude_patterns: [String]?
     var backup_tolerated_ephemeral_ignore_patterns: [String]?
     var protected_data_probe_paths: [String]?
     var cloud_materialization_roots: [String]?
@@ -174,10 +242,14 @@ struct RuntimeConfigOverrides: Decodable {
     var limited_backup_acknowledged: Bool?
 
     func apply(to defaults: RuntimeConfig) -> RuntimeConfig {
-        RuntimeConfig(
+        let resolvedEphemeralExcludePatterns = ephemeral_exclude_patterns
+            ?? backup_tolerated_ephemeral_ignore_patterns
+            ?? defaults.ephemeral_exclude_patterns
+
+        return RuntimeConfig(
             backup_source: backup_source ?? defaults.backup_source,
             backup_ignore_patterns: backup_ignore_patterns ?? defaults.backup_ignore_patterns,
-            backup_tolerated_ephemeral_ignore_patterns: backup_tolerated_ephemeral_ignore_patterns ?? defaults.backup_tolerated_ephemeral_ignore_patterns,
+            ephemeral_exclude_patterns: resolvedEphemeralExcludePatterns,
             protected_data_probe_paths: protected_data_probe_paths ?? defaults.protected_data_probe_paths,
             cloud_materialization_roots: cloud_materialization_roots ?? defaults.cloud_materialization_roots,
             cloud_materialization_enabled: cloud_materialization_enabled ?? defaults.cloud_materialization_enabled,
@@ -274,8 +346,8 @@ enum Config {
     static var backupSource: String { runtime.backup_source }
     static let backupIgnoreFile = "\(appSupportDir)/kopiaignore"
     static var backupIgnorePatterns: [String] { runtime.backup_ignore_patterns }
-    static var backupToleratedEphemeralIgnorePatterns: [String] {
-        runtime.backup_tolerated_ephemeral_ignore_patterns
+    static var ephemeralExcludePatterns: [String] {
+        runtime.ephemeral_exclude_patterns
     }
     static var protectedDataProbePaths: [String] { runtime.protected_data_probe_paths }
     static var cloudMaterializationRoots: [String] { runtime.cloud_materialization_roots }
@@ -361,7 +433,7 @@ struct ConfigSummary: Codable {
     var backup_source: String
     var backup_ignore_file: String
     var backup_ignore_patterns: [String]
-    var backup_tolerated_ephemeral_ignore_patterns: [String]
+    var ephemeral_exclude_patterns: [String]
     var protected_data_probe_paths: [String]
     var cloud_materialization_roots: [String]
     var cloud_materialization_enabled: Bool
@@ -406,7 +478,7 @@ extension ConfigSummary {
         case backup_source
         case backup_ignore_file
         case backup_ignore_patterns
-        case backup_tolerated_ephemeral_ignore_patterns
+        case ephemeral_exclude_patterns
         case protected_data_probe_paths
         case cloud_materialization_roots
         case cloud_materialization_enabled
@@ -451,7 +523,7 @@ extension ConfigSummary {
         backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
         backup_ignore_file = try container.decodeIfPresent(String.self, forKey: .backup_ignore_file) ?? Config.backupIgnoreFile
         backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_ignore_patterns) ?? Config.backupIgnorePatterns
-        backup_tolerated_ephemeral_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_tolerated_ephemeral_ignore_patterns) ?? Config.backupToleratedEphemeralIgnorePatterns
+        ephemeral_exclude_patterns = try container.decodeIfPresent([String].self, forKey: .ephemeral_exclude_patterns) ?? Config.ephemeralExcludePatterns
         protected_data_probe_paths = try container.decodeIfPresent([String].self, forKey: .protected_data_probe_paths) ?? Config.protectedDataProbePaths
         cloud_materialization_roots = try container.decodeIfPresent([String].self, forKey: .cloud_materialization_roots) ?? Config.cloudMaterializationRoots
         cloud_materialization_enabled = try container.decodeIfPresent(Bool.self, forKey: .cloud_materialization_enabled) ?? Config.cloudMaterializationEnabled
@@ -498,7 +570,7 @@ enum ConfigSummaryFactory {
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
-            backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
+            ephemeral_exclude_patterns: Config.ephemeralExcludePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
             cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -2694,7 +2766,7 @@ enum KopiaFileIssueClassifier {
 
         if let relativePath,
            PathPatternMatcher.matchesAny(
-               Config.backupToleratedEphemeralIgnorePatterns,
+               Config.ephemeralExcludePatterns,
                relativePath: relativePath
            ) {
             return KopiaSnapshotIssueSample(

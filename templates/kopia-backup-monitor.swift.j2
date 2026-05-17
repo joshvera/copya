@@ -18,8 +18,8 @@ enum Config {
         "{{ pattern }}",
 {% endfor %}
     ]
-    static let backupToleratedEphemeralIgnorePatterns: [String] = [
-{% for entry in backup_tolerated_ephemeral_ignore_patterns %}
+    static let ephemeralExcludePatterns: [String] = [
+{% for entry in ephemeral_exclude_patterns %}
         "{{ entry.pattern }}",
 {% endfor %}
     ]
@@ -109,7 +109,7 @@ struct ConfigSummary: Codable {
     var backup_source: String
     var backup_ignore_file: String
     var backup_ignore_patterns: [String]
-    var backup_tolerated_ephemeral_ignore_patterns: [String]
+    var ephemeral_exclude_patterns: [String]
     var protected_data_probe_paths: [String]
     var cloud_materialization_roots: [String]
     var cloud_materialization_enabled: Bool
@@ -148,7 +148,7 @@ extension ConfigSummary {
         case backup_source
         case backup_ignore_file
         case backup_ignore_patterns
-        case backup_tolerated_ephemeral_ignore_patterns
+        case ephemeral_exclude_patterns
         case protected_data_probe_paths
         case cloud_materialization_roots
         case cloud_materialization_enabled
@@ -187,7 +187,7 @@ extension ConfigSummary {
         backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
         backup_ignore_file = try container.decodeIfPresent(String.self, forKey: .backup_ignore_file) ?? Config.backupIgnoreFile
         backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_ignore_patterns) ?? Config.backupIgnorePatterns
-        backup_tolerated_ephemeral_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_tolerated_ephemeral_ignore_patterns) ?? Config.backupToleratedEphemeralIgnorePatterns
+        ephemeral_exclude_patterns = try container.decodeIfPresent([String].self, forKey: .ephemeral_exclude_patterns) ?? Config.ephemeralExcludePatterns
         protected_data_probe_paths = try container.decodeIfPresent([String].self, forKey: .protected_data_probe_paths) ?? Config.protectedDataProbePaths
         cloud_materialization_roots = try container.decodeIfPresent([String].self, forKey: .cloud_materialization_roots) ?? Config.cloudMaterializationRoots
         cloud_materialization_enabled = try container.decodeIfPresent(Bool.self, forKey: .cloud_materialization_enabled) ?? Config.cloudMaterializationEnabled
@@ -2282,7 +2282,7 @@ enum KopiaFileIssueClassifier {
 
         if let relativePath,
            PathPatternMatcher.matchesAny(
-               Config.backupToleratedEphemeralIgnorePatterns,
+               Config.ephemeralExcludePatterns,
                relativePath: relativePath
            ) {
             return KopiaSnapshotIssueSample(
@@ -5656,7 +5656,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
-            backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
+            ephemeral_exclude_patterns: Config.ephemeralExcludePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
             cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -6049,7 +6049,7 @@ final class CLIAppDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDe
                 backup_source: Config.backupSource,
                 backup_ignore_file: Config.backupIgnoreFile,
                 backup_ignore_patterns: Config.backupIgnorePatterns,
-                backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
+                ephemeral_exclude_patterns: Config.ephemeralExcludePatterns,
                 protected_data_probe_paths: Config.protectedDataProbePaths,
                 cloud_materialization_roots: Config.cloudMaterializationRoots,
                 cloud_materialization_enabled: Config.cloudMaterializationEnabled,
@@ -6187,7 +6187,7 @@ func printStatusJSONAndExit() -> Never {
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
-            backup_tolerated_ephemeral_ignore_patterns: Config.backupToleratedEphemeralIgnorePatterns,
+            ephemeral_exclude_patterns: Config.ephemeralExcludePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
             cloud_materialization_enabled: Config.cloudMaterializationEnabled,

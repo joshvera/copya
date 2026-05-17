@@ -10,8 +10,20 @@ except ImportError as exc:
     ) from exc
 
 
-def data(name):
-    return host.data.get(name, getattr(defaults, name))
+def data(name, legacy_name=None):
+    missing = object()
+    value = host.data.get(name, missing)
+    if value is not missing:
+        return value
+    if legacy_name is not None:
+        value = host.data.get(legacy_name, missing)
+        if value is not missing:
+            return value
+    if hasattr(defaults, name):
+        return getattr(defaults, name)
+    if legacy_name is not None and hasattr(defaults, legacy_name):
+        return getattr(defaults, legacy_name)
+    return getattr(defaults, name)
 
 
 def bool_data(name):
@@ -26,7 +38,10 @@ home = data("home")
 backup_source = data("backup_source")
 backup_ignore_file = data("backup_ignore_file")
 backup_ignore_patterns = data("backup_ignore_patterns")
-backup_tolerated_ephemeral_ignore_patterns = data("backup_tolerated_ephemeral_ignore_patterns")
+ephemeral_exclude_patterns = data(
+    "ephemeral_exclude_patterns",
+    legacy_name="backup_tolerated_ephemeral_ignore_patterns",
+)
 protected_data_probe_paths = data("protected_data_probe_paths")
 cloud_materialization_roots = data("cloud_materialization_roots")
 cloud_materialization_enabled = bool_data("cloud_materialization_enabled")
@@ -111,7 +126,7 @@ template_context = {
     "active_run_file": active_run_file,
     "backup_ignore_file": backup_ignore_file,
     "backup_ignore_patterns": backup_ignore_patterns,
-    "backup_tolerated_ephemeral_ignore_patterns": backup_tolerated_ephemeral_ignore_patterns,
+    "ephemeral_exclude_patterns": ephemeral_exclude_patterns,
     "backup_source": backup_source,
     "cloud_materialization_enabled": cloud_materialization_enabled,
     "cloud_materialization_requires_allowed_network": cloud_materialization_requires_allowed_network,

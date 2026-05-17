@@ -1,9 +1,11 @@
+import ast
 import fnmatch
 import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -66,7 +68,7 @@ def compile_monitor_binary(source: str, tmpdir: str) -> Path:
     return binary_path
 
 
-def render_kopiaignore(patterns=None, tolerated_patterns=None) -> str:
+def render_kopiaignore(patterns=None, ephemeral_patterns=None) -> str:
     env = Environment(
         loader=FileSystemLoader(str(ROOT / "templates")),
         keep_trailing_newline=True,
@@ -75,16 +77,33 @@ def render_kopiaignore(patterns=None, tolerated_patterns=None) -> str:
     return template.render(
         backup_source=data.backup_source,
         backup_ignore_patterns=patterns if patterns is not None else data.backup_ignore_patterns,
-        backup_tolerated_ephemeral_ignore_patterns=(
-            tolerated_patterns
-            if tolerated_patterns is not None
-            else data.backup_tolerated_ephemeral_ignore_patterns
+        ephemeral_exclude_patterns=(
+            ephemeral_patterns
+            if ephemeral_patterns is not None
+            else data.ephemeral_exclude_patterns
         ),
     )
 
 
 def pattern_matches(pattern: str, path: str) -> bool:
     return fnmatch.fnmatchcase(path.lstrip("/"), pattern.lstrip("/"))
+
+
+def load_deploy_data_function(host_data, defaults_attrs):
+    deploy_ast = ast.parse((ROOT / "deploy.py").read_text())
+    data_func = next(
+        node
+        for node in deploy_ast.body
+        if isinstance(node, ast.FunctionDef) and node.name == "data"
+    )
+    module = ast.Module(body=[data_func], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {
+        "host": SimpleNamespace(data=host_data),
+        "defaults": SimpleNamespace(**defaults_attrs),
+    }
+    exec(compile(module, "deploy.py:data", "exec"), namespace)
+    return namespace["data"]
 
 
 class CopyaTemplateTest(unittest.TestCase):
@@ -488,6 +507,82 @@ class CopyaTemplateTest(unittest.TestCase):
             },
         )
 
+    def test_raw_kopia_replay_classifies_orbstack_image_mount_as_tolerated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_log_path = Path(tmpdir) / "fixture.log"
+            source = render_monitor_source()
+            binary_path = compile_monitor_binary(source, tmpdir)
+            raw_log_path.write_text(
+                "\n".join(
+                    [
+                        "2026-05-10T13:00:00-0300 raw kopia output starting run_id=RUN-ORB pid=777",
+                        (
+                            'Error when processing "OrbStack/docker/images/nanoclaw-agent:latest": '
+                            "unable to open file: unable to open local file: open "
+                            "/Users/example/OrbStack/docker/images/nanoclaw-agent:latest: "
+                            "operation not permitted"
+                        ),
+                        "Created snapshot with root root-orb and ID snap-orb in 2s",
+                        "Found 1 fatal error(s) while snapshotting example@mac:/Users/example.",
+                        "2026-05-10T13:00:02-0300 raw kopia output finished status=1",
+                        "",
+                    ]
+                )
+            )
+
+            result = subprocess.run(
+                [str(binary_path), "--classify-kopia-log", str(raw_log_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            parsed = json.loads(result.stdout)
+
+        self.assertEqual(parsed["snapshot_result"], "partial_tolerated")
+        self.assertEqual(parsed["fatal_error_count"], 1)
+        self.assertEqual(parsed["tolerated_count"], 1)
+        self.assertEqual(parsed["action_required_count"], 0)
+        self.assertEqual(parsed["unclassified_count"], 0)
+        self.assertEqual(parsed["categorized_counts"], {"tolerated_system_ephemeral": 1})
+
+    def test_raw_kopia_replay_keeps_orbstack_volume_mount_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_log_path = Path(tmpdir) / "fixture.log"
+            source = render_monitor_source()
+            binary_path = compile_monitor_binary(source, tmpdir)
+            raw_log_path.write_text(
+                "\n".join(
+                    [
+                        "2026-05-10T13:00:00-0300 raw kopia output starting run_id=RUN-ORBVOL pid=778",
+                        (
+                            'Error when processing "OrbStack/docker/volumes/project-db/_data/db.sqlite": '
+                            "unable to open file: unable to open local file: open "
+                            "/Users/example/OrbStack/docker/volumes/project-db/_data/db.sqlite: "
+                            "operation not permitted"
+                        ),
+                        "Created snapshot with root root-orbvol and ID snap-orbvol in 2s",
+                        "Found 1 fatal error(s) while snapshotting example@mac:/Users/example.",
+                        "2026-05-10T13:00:02-0300 raw kopia output finished status=1",
+                        "",
+                    ]
+                )
+            )
+
+            result = subprocess.run(
+                [str(binary_path), "--classify-kopia-log", str(raw_log_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            parsed = json.loads(result.stdout)
+
+        self.assertEqual(parsed["snapshot_result"], "partial_action_required")
+        self.assertEqual(parsed["fatal_error_count"], 1)
+        self.assertEqual(parsed["tolerated_count"], 0)
+        self.assertEqual(parsed["action_required_count"], 1)
+        self.assertEqual(parsed["unclassified_count"], 1)
+        self.assertEqual(parsed["categorized_counts"], {"unclassified": 1})
+
     def test_nonzero_exit_without_file_error_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             raw_log_path = Path(tmpdir) / "fixture.log"
@@ -545,12 +640,32 @@ class CopyaTemplateTest(unittest.TestCase):
 
     def test_complete_backup_scope_remains_default(self) -> None:
         self.assertEqual(data.backup_ignore_patterns, [])
-        self.assertTrue(data.backup_tolerated_ephemeral_ignore_patterns)
+        self.assertTrue(data.ephemeral_exclude_patterns)
+        self.assertNotIn(
+            "/Library/*",
+            [entry["pattern"] for entry in data.ephemeral_exclude_patterns],
+        )
+
+    def test_templates_use_canonical_ephemeral_exclude_name(self) -> None:
+        source = render_monitor_source()
+        deploy = (ROOT / "deploy.py").read_text()
+        kopiaignore = (ROOT / "templates" / "kopiaignore.j2").read_text()
+        release_smoke = (ROOT / "scripts" / "release-smoke.sh").read_text()
+
+        self.assertIn("ephemeral_exclude_patterns", source)
+        self.assertIn("ephemeralExcludePatterns", source)
+        self.assertIn('ephemeral_exclude_patterns = data(\n    "ephemeral_exclude_patterns"', deploy)
+        self.assertIn('legacy_name="backup_tolerated_ephemeral_ignore_patterns"', deploy)
+        self.assertIn("{% for entry in ephemeral_exclude_patterns -%}", kopiaignore)
+        self.assertIn('"ephemeral_exclude_patterns": []', release_smoke)
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", source)
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", kopiaignore)
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", release_smoke)
 
     def test_tolerated_ephemeral_ignores_are_narrow(self) -> None:
         patterns = [
             entry["pattern"]
-            for entry in data.backup_tolerated_ephemeral_ignore_patterns
+            for entry in data.ephemeral_exclude_patterns
         ]
 
         positive_paths = [
@@ -562,6 +677,7 @@ class CopyaTemplateTest(unittest.TestCase):
             "/Library/Daemon Containers/ABC/Data/com.apple.milod/milo.db-wal",
             "/Library/Group Containers/group.com.apple.secure-control-center-preferences/Library/Preferences/example.plist",
             "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/example",
+            "/OrbStack/docker/images/nanoclaw-agent:latest",
         ]
         negative_paths = [
             "/Library/Mobile Documents/com~apple~CloudDocs/NOTARY DOCS/file.jpeg",
@@ -575,6 +691,9 @@ class CopyaTemplateTest(unittest.TestCase):
             "/Pictures/Photos Library.photoslibrary/database/Photos.sqlite",
             "/Library/Application Support/FileProvider/ABC/user-file.txt",
             "/Library/Containers/com.example.App/Data/Documents/user-file.db",
+            "/OrbStack/docker/volumes/project-db/_data/db.sqlite",
+            "/OrbStack/docker/containers/app/rootfs/etc/passwd",
+            "/OrbStack/ubuntu/home/example/project.txt",
         ]
 
         for path in positive_paths:
@@ -656,14 +775,43 @@ class CopyaTemplateTest(unittest.TestCase):
             "critical_runtime_free_space_bytes",
             "unknown_icloud_placeholder_estimate_bytes",
             "disk_free_space_check_paths",
-            "backup_tolerated_ephemeral_ignore_patterns",
+            "ephemeral_exclude_patterns",
             "password_source",
             "password_env_var",
             "password_command",
             "password_read_timeout_seconds",
         ]:
-            self.assertIn(f'{name} = data("{name}")', deploy)
+            if name == "ephemeral_exclude_patterns":
+                self.assertIn('ephemeral_exclude_patterns = data(\n    "ephemeral_exclude_patterns"', deploy)
+            else:
+                self.assertIn(f'{name} = data("{name}")', deploy)
             self.assertIn(f'"{name}": {name}', deploy)
+
+    def test_deploy_data_supports_legacy_ephemeral_exclude_name(self) -> None:
+        legacy_name = "backup_tolerated_ephemeral_ignore_patterns"
+        data_func = load_deploy_data_function(
+            host_data={},
+            defaults_attrs={legacy_name: [{"pattern": "/Old/*"}]},
+        )
+
+        self.assertEqual(
+            data_func("ephemeral_exclude_patterns", legacy_name=legacy_name),
+            [{"pattern": "/Old/*"}],
+        )
+
+    def test_deploy_data_host_override_avoids_eager_default_lookup(self) -> None:
+        data_func = load_deploy_data_function(
+            host_data={"ephemeral_exclude_patterns": [{"pattern": "/New/*"}]},
+            defaults_attrs={},
+        )
+
+        self.assertEqual(
+            data_func(
+                "ephemeral_exclude_patterns",
+                legacy_name="backup_tolerated_ephemeral_ignore_patterns",
+            ),
+            [{"pattern": "/New/*"}],
+        )
 
 
 if __name__ == "__main__":

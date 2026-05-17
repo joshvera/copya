@@ -4,7 +4,7 @@ home = f"/Users/{user}"
 backup_source = home
 backup_ignore_file = f"{home}/.kopiaignore"
 backup_ignore_patterns = []
-backup_tolerated_ephemeral_ignore_patterns = [
+ephemeral_exclude_patterns = [
     {
         "pattern": "/Library/Metadata/CoreSpotlight/*",
         "reason": "CoreSpotlight indexes are system-generated and protected.",
@@ -36,6 +36,10 @@ backup_tolerated_ephemeral_ignore_patterns = [
     {
         "pattern": "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
         "reason": "Maps ReportAProblem staging files are app-generated scratch data.",
+    },
+    {
+        "pattern": "/OrbStack/docker/images/*",
+        "reason": "OrbStack Docker image mounts are virtual, reconstructable developer-tool artifacts.",
     },
 ]
 
