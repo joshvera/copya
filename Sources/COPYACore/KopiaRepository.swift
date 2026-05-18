@@ -83,6 +83,35 @@ public enum KopiaRepositoryCommand {
         return arguments
     }
 
+    public static func policyShowArguments(configFile: String?, target: String) -> [String] {
+        var arguments = globalArguments(configFile: configFile)
+        arguments += ["policy", "show", "--json", target]
+        return arguments
+    }
+
+    public static func policySetArguments(
+        configFile: String?,
+        target: String,
+        addIgnorePatterns: [String],
+        ignoreCacheDirs: Bool?
+    ) -> [String] {
+        var arguments = globalArguments(configFile: configFile)
+        arguments += ["policy", "set", target]
+        for pattern in addIgnorePatterns {
+            arguments += ["--add-ignore", pattern]
+        }
+        if let ignoreCacheDirs {
+            arguments += ["--ignore-cache-dirs", ignoreCacheDirs ? "true" : "false"]
+        }
+        return arguments
+    }
+
+    public static func cacheInfoPathArguments(configFile: String?) -> [String] {
+        var arguments = globalArguments(configFile: configFile)
+        arguments += ["cache", "info", "--path"]
+        return arguments
+    }
+
     public static func backblazeB2S3Spec(
         request: BackblazeB2S3RepositoryRequest,
         baseEnvironment: [String: String],
@@ -123,6 +152,79 @@ public enum KopiaRepositoryCommand {
             return []
         }
         return ["--config-file", configFile]
+    }
+}
+
+public struct KopiaPolicySnapshot: Decodable, Equatable {
+    public var files: KopiaPolicyFiles
+
+    public init(files: KopiaPolicyFiles) {
+        self.files = files
+    }
+}
+
+public struct KopiaPolicyFiles: Decodable, Equatable {
+    public var ignore: [String]
+    public var ignoreCacheDirs: Bool?
+
+    public init(ignore: [String], ignoreCacheDirs: Bool?) {
+        self.ignore = ignore
+        self.ignoreCacheDirs = ignoreCacheDirs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ignore
+        case ignoreCacheDirs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ignore = try container.decodeIfPresent([String].self, forKey: .ignore) ?? []
+        ignoreCacheDirs = try container.decodeIfPresent(Bool.self, forKey: .ignoreCacheDirs)
+    }
+}
+
+public struct KopiaPolicyReconciliation: Equatable {
+    public var missingIgnorePatterns: [String]
+    public var shouldEnableIgnoreCacheDirs: Bool
+
+    public init(missingIgnorePatterns: [String], shouldEnableIgnoreCacheDirs: Bool) {
+        self.missingIgnorePatterns = missingIgnorePatterns
+        self.shouldEnableIgnoreCacheDirs = shouldEnableIgnoreCacheDirs
+    }
+
+    public var requiresUpdate: Bool {
+        !missingIgnorePatterns.isEmpty || shouldEnableIgnoreCacheDirs
+    }
+}
+
+public enum KopiaPolicyReconciler {
+    public static func reconcile(
+        files: KopiaPolicyFiles,
+        managedIgnorePatterns: [String],
+        userIgnorePatterns: [String]
+    ) -> KopiaPolicyReconciliation {
+        let desiredPatterns = orderedUnique(managedIgnorePatterns + userIgnorePatterns)
+        let existingPatterns = Set(files.ignore)
+        let missingPatterns = desiredPatterns.filter { !existingPatterns.contains($0) }
+        return KopiaPolicyReconciliation(
+            missingIgnorePatterns: missingPatterns,
+            shouldEnableIgnoreCacheDirs: files.ignoreCacheDirs != true
+        )
+    }
+
+    public static func orderedUnique(_ patterns: [String]) -> [String] {
+        var seen = Set<String>()
+        var unique: [String] = []
+        for pattern in patterns {
+            let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !seen.contains(trimmed) else {
+                continue
+            }
+            seen.insert(trimmed)
+            unique.append(trimmed)
+        }
+        return unique
     }
 }
 

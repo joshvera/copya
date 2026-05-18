@@ -1,6 +1,7 @@
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,32 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+LEGACY_DEFAULT_EPHEMERAL_PATTERNS = [
+    "/Library/Metadata/CoreSpotlight/*",
+    "/Library/Application Support/FileProvider/*/wharf/tombstone/*",
+    "/Library/DuetExpertCenter/*",
+    "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/*",
+    "/Library/Containers/*/Data/Library/Saved Application State/*",
+    "/Library/Daemon Containers/*/Data/com.apple.milod/*",
+    "/Library/Group Containers/group.com.apple.secure-control-center-preferences/*",
+    "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
+    "/OrbStack/docker/images/*",
+]
+
+CURRENT_DEFAULT_EPHEMERAL_PATTERNS = [
+    "/Library/Caches/**",
+    "/Library/Logs/**",
+    "/Library/Metadata/CoreSpotlight/**",
+    "/Library/Application Support/FileProvider/*/wharf/tombstone/**",
+    "/Library/DuetExpertCenter/**",
+    "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/**",
+    "/Library/Containers/*/Data/Library/Saved Application State/**",
+    "/Library/Daemon Containers/*/Data/com.apple.milod/**",
+    "/Library/Group Containers/group.com.apple.secure-control-center-preferences/**",
+    "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/**",
+    "/OrbStack/docker/images/**",
+]
 
 
 class StandaloneAppTest(unittest.TestCase):
@@ -35,6 +62,21 @@ class StandaloneAppTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as runtime_root:
             return subprocess.run(
                 [str(self.copya_binary()), "--config-json"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "COPYA_CONFIG_FILE": str(config_path),
+                    "COPYA_RUNTIME_ROOT": runtime_root,
+                },
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+    def run_status_json(self, config_path: Path) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as runtime_root:
+            return subprocess.run(
+                [str(self.copya_binary()), "--status-json"],
                 cwd=ROOT,
                 env={
                     **os.environ,
@@ -88,6 +130,27 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertIn('static let configFile = explicitConfigFile ?? "\\(appSupportDir)/config.json"', source)
         self.assertIn("network_policy_enabled", source)
         self.assertIn("kopia_config_file", source)
+        self.assertIn("managedBackupIgnorePatterns", source)
+        self.assertIn('"/Library/Caches/**"', source)
+        self.assertIn('"/Library/Logs/**"', source)
+        self.assertIn('"/OrbStack/docker/images/**"', source)
+        self.assertIn("legacyDefaultEphemeralExcludePatterns", source)
+        self.assertIn(".volumeAvailableCapacityForImportantUsageKey", source)
+        self.assertIn("preferImportantUsage: true", source)
+        self.assertIn("filesystem_free_bytes", source)
+        self.assertIn("capacity_api", source)
+        self.assertIn("status.config_summary = ConfigSummaryFactory.current()", source)
+        self.assertIn("refreshIdleStartDiskHealthIfNeeded()", source)
+        self.assertIn('environment["KOPIA_CACHE_DIRECTORY"] = Config.kopiaCacheDir', source)
+        self.assertIn("KopiaRepositoryCommand.policyShowArguments", source)
+        self.assertIn("KopiaRepositoryCommand.policySetArguments", source)
+        self.assertIn("KopiaRepositoryCommand.cacheInfoPathArguments", source)
+        self.assertIn("prepareKopiaRuntime(kopiaPath: kopiaPath, password: password)", source)
+        launch_source = source[source.index("private func startKopiaLaunch("):]
+        self.assertLess(
+            launch_source.index("let launchScan = ProcessInspector.scanKopiaSnapshots()"),
+            launch_source.index("try self.prepareKopiaRuntime(kopiaPath: kopiaPath, password: password)"),
+        )
         self.assertIn("KopiaCommand.snapshotCreateArguments()", source)
         self.assertIn("--config-json", source)
         self.assertIn("--write-default-config", source)
@@ -131,6 +194,234 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertNotIn("{%", source)
         self.assertNotIn("/Users/example", source)
 
+    def test_status_json_reports_managed_exclusions_and_cache_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_ignore_patterns": ["/Projects/tmp/**"],
+                    }
+                )
+            )
+
+            result = self.run_status_json(config_path)
+            parsed = json.loads(result.stdout)["config_summary"]
+
+        self.assertEqual(parsed["backup_ignore_patterns"], ["/Projects/tmp/**"])
+        self.assertIn("/Library/Caches/**", parsed["managed_backup_ignore_patterns"])
+        self.assertIn("/Library/Logs/**", parsed["managed_backup_ignore_patterns"])
+        self.assertIn("/Library/Application Support/COPYA/status.json", parsed["managed_backup_ignore_patterns"])
+        self.assertIn("/Projects/tmp/**", parsed["effective_backup_ignore_patterns"])
+        self.assertEqual(
+            parsed["effective_backup_ignore_patterns"].count("/Library/Caches/**"),
+            1,
+        )
+        self.assertTrue(parsed["kopia_cache_directory"].endswith("/Caches/COPYA/kopia"))
+        self.assertEqual(parsed["disk_free_space_check_paths"][0], parsed["kopia_cache_directory"])
+
+    def test_status_json_refreshes_stale_persisted_config_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            runtime_root = root / "runtime"
+            status_path = runtime_root / "Application Support" / "COPYA" / "status.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(root / "home"),
+                        "backup_ignore_patterns": ["/Projects/tmp/**"],
+                        "minimum_execution_reserve_bytes": 1,
+                    }
+                )
+            )
+            status_path.parent.mkdir(parents=True)
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "app_version": "0.0.0",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "state": "needs_disk_space",
+                        "network_state": "allowed",
+                        "network_reason": "stale persisted status",
+                        "network_is_expensive": False,
+                        "network_is_constrained": False,
+                        "config_summary": {
+                            "app_name": "COPYA",
+                            "backup_source": str(root / "home"),
+                            "ephemeral_exclude_patterns": ["/stale/*"],
+                        },
+                    }
+                )
+            )
+
+            result = subprocess.run(
+                [str(self.copya_binary()), "--status-json"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "COPYA_CONFIG_FILE": str(config_path),
+                    "COPYA_RUNTIME_ROOT": str(runtime_root),
+                },
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            parsed = json.loads(result.stdout)
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["app_version"], "1.1.1")
+        self.assertEqual(parsed["state"], "ready")
+        self.assertTrue(parsed["disk_health"]["ok"])
+        self.assertEqual(parsed["disk_health"]["results"][0]["capacity_api"], "important_usage")
+        self.assertIn("filesystem_free_bytes", parsed["disk_health"]["results"][0])
+        self.assertEqual(parsed["config_summary"]["backup_ignore_patterns"], ["/Projects/tmp/**"])
+        self.assertIn("/Library/Caches/**", parsed["config_summary"]["managed_backup_ignore_patterns"])
+        self.assertIn("/Library/Logs/**", parsed["config_summary"]["ephemeral_exclude_patterns"])
+        self.assertNotIn("/stale/*", parsed["config_summary"]["ephemeral_exclude_patterns"])
+
+    def test_backup_once_applies_managed_cache_exclusion_policy(self) -> None:
+        kopia = shutil.which("kopia")
+        if kopia is None:
+            self.skipTest("kopia CLI is not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_dir = root / "repo"
+            source_dir = root / "source"
+            runtime_root = root / "runtime"
+            kopia_home = root / "kopia-home"
+            kopia_config = root / "kopia.repository.config"
+            config_path = root / "copya-config.json"
+            restore_dir = root / "restore"
+            password = "copya-smoke-password"
+
+            (source_dir / "Library" / "Caches" / "example").mkdir(parents=True)
+            (source_dir / "Library" / "Application Support" / "COPYA").mkdir(parents=True)
+            repo_dir.mkdir()
+            runtime_root.mkdir()
+            kopia_home.mkdir()
+            restore_dir.mkdir()
+            (source_dir / "Library" / "Caches" / "example" / "blob.txt").write_text("drop me")
+            (source_dir / "Library" / "Application Support" / "COPYA" / "config.json").write_text("keep me")
+
+            kopia_env = {
+                **os.environ,
+                "HOME": str(kopia_home),
+                "KOPIA_PASSWORD": password,
+                "KOPIA_CACHE_DIRECTORY": str(runtime_root / "Caches" / "COPYA" / "kopia"),
+                "KOPIA_CHECK_FOR_UPDATES": "false",
+            }
+            subprocess.run(
+                [
+                    kopia,
+                    "--config-file",
+                    str(kopia_config),
+                    "--no-persist-credentials",
+                    "--no-use-keychain",
+                    "repository",
+                    "create",
+                    "filesystem",
+                    "--path",
+                    str(repo_dir),
+                    "--override-username",
+                    "copya",
+                    "--override-hostname",
+                    "smoke",
+                ],
+                cwd=ROOT,
+                env=kopia_env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(source_dir),
+                        "backup_ignore_patterns": [],
+                        "protected_data_probe_paths": [str(source_dir)],
+                        "cloud_materialization_roots": [],
+                        "cloud_materialization_enabled": False,
+                        "cloud_materialization_requires_allowed_network": False,
+                        "network_policy_enabled": False,
+                        "deny_ssids": [],
+                        "run_interval_seconds": 21600,
+                        "network_check_interval_seconds": 5,
+                        "preflight_failure_retry_seconds": 5,
+                        "password_source": "environment",
+                        "password_env_var": "KOPIA_PASSWORD",
+                        "password_command": [],
+                        "password_read_timeout_seconds": 5,
+                        "kopia_config_file": str(kopia_config),
+                        "minimum_execution_reserve_bytes": 1048576,
+                        "critical_runtime_free_space_bytes": 1048576,
+                        "unknown_icloud_placeholder_estimate_bytes": 1048576,
+                    }
+                )
+            )
+
+            copya_env = {
+                **kopia_env,
+                "COPYA_CONFIG_FILE": str(config_path),
+                "COPYA_RUNTIME_ROOT": str(runtime_root),
+            }
+            subprocess.run(
+                [str(self.copya_binary()), "--backup-once", "--timeout", "90"],
+                cwd=ROOT,
+                env=copya_env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            status = json.loads(
+                subprocess.run(
+                    [str(self.copya_binary()), "--status-json"],
+                    cwd=ROOT,
+                    env=copya_env,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout
+            )
+            self.assertEqual(status["last_snapshot_result"], "clean")
+            self.assertEqual(status["last_snapshot_action_required_count"], 0)
+            self.assertIn(
+                "/Library/Caches/**",
+                status["config_summary"]["effective_backup_ignore_patterns"],
+            )
+            self.assertEqual(
+                status["config_summary"]["kopia_cache_directory"],
+                str(runtime_root / "Caches" / "COPYA" / "kopia"),
+            )
+
+            snapshot_id = status["last_snapshot_id"]
+            subprocess.run(
+                [
+                    kopia,
+                    "--config-file",
+                    str(kopia_config),
+                    "--no-persist-credentials",
+                    "--no-use-keychain",
+                    "snapshot",
+                    "restore",
+                    snapshot_id,
+                    str(restore_dir),
+                ],
+                cwd=ROOT,
+                env=kopia_env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            self.assertFalse((restore_dir / "Library" / "Caches" / "example" / "blob.txt").exists())
+            self.assertEqual(
+                (restore_dir / "Library" / "Application Support" / "COPYA" / "config.json").read_text(),
+                "keep me",
+            )
+
     def test_config_json_migrates_legacy_ephemeral_exclude_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
@@ -154,6 +445,47 @@ class StandaloneAppTest(unittest.TestCase):
         self.assertEqual(migrated["ephemeral_exclude_patterns"], ["/Legacy/*"])
         self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", migrated)
         self.assertEqual(migrated["unknown_object"], {"preserve": True})
+
+    def test_config_json_upgrades_exact_legacy_default_ephemeral_excludes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "ephemeral_exclude_patterns": LEGACY_DEFAULT_EPHEMERAL_PATTERNS,
+                    }
+                )
+            )
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            migrated = json.loads(config_path.read_text())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], CURRENT_DEFAULT_EPHEMERAL_PATTERNS)
+        self.assertEqual(migrated["ephemeral_exclude_patterns"], CURRENT_DEFAULT_EPHEMERAL_PATTERNS)
+
+    def test_config_json_upgrades_legacy_key_with_exact_legacy_default_ephemeral_excludes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "backup_source": str(Path(tmpdir) / "home"),
+                        "backup_tolerated_ephemeral_ignore_patterns": LEGACY_DEFAULT_EPHEMERAL_PATTERNS,
+                    }
+                )
+            )
+
+            result = self.run_config_json(config_path)
+            parsed = json.loads(result.stdout)
+            migrated = json.loads(config_path.read_text())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(parsed["ephemeral_exclude_patterns"], CURRENT_DEFAULT_EPHEMERAL_PATTERNS)
+        self.assertEqual(migrated["ephemeral_exclude_patterns"], CURRENT_DEFAULT_EPHEMERAL_PATTERNS)
+        self.assertNotIn("backup_tolerated_ephemeral_ignore_patterns", migrated)
 
     def test_config_json_canonical_ephemeral_exclude_key_wins_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
