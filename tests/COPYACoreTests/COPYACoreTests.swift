@@ -94,6 +94,62 @@ final class COPYACoreTests: XCTestCase {
         XCTAssertEqual(spec.environment["AWS_SECRET_ACCESS_KEY"], "app-key")
     }
 
+    func testPolicyAndCacheCommandBuilders() {
+        XCTAssertEqual(
+            KopiaRepositoryCommand.policyShowArguments(
+                configFile: "/tmp/kopia.config",
+                target: "/Users/example"
+            ),
+            ["--config-file", "/tmp/kopia.config", "policy", "show", "--json", "/Users/example"]
+        )
+        XCTAssertEqual(
+            KopiaRepositoryCommand.policySetArguments(
+                configFile: "/tmp/kopia.config",
+                target: "/Users/example",
+                addIgnorePatterns: ["/Library/Caches/**", "/Library/Logs/**"],
+                ignoreCacheDirs: true
+            ),
+            [
+                "--config-file", "/tmp/kopia.config",
+                "policy", "set", "/Users/example",
+                "--add-ignore", "/Library/Caches/**",
+                "--add-ignore", "/Library/Logs/**",
+                "--ignore-cache-dirs", "true",
+            ]
+        )
+        XCTAssertEqual(
+            KopiaRepositoryCommand.cacheInfoPathArguments(configFile: "/tmp/kopia.config"),
+            ["--config-file", "/tmp/kopia.config", "cache", "info", "--path"]
+        )
+    }
+
+    func testPolicyJsonParsingAndReconciliation() throws {
+        let data = """
+        {
+          "files": {
+            "ignore": ["/Library/Caches/**", "/Unmanaged/**"],
+            "ignoreCacheDirs": false
+          }
+        }
+        """.data(using: .utf8)!
+        let policy = try JSONDecoder().decode(KopiaPolicySnapshot.self, from: data)
+
+        let reconciliation = KopiaPolicyReconciler.reconcile(
+            files: policy.files,
+            managedIgnorePatterns: ["/Library/Caches/**", "/Library/Logs/**", "/Library/Logs/**"],
+            userIgnorePatterns: ["/Projects/tmp/**", " ", "/Projects/tmp/**"]
+        )
+
+        XCTAssertEqual(policy.files.ignore, ["/Library/Caches/**", "/Unmanaged/**"])
+        XCTAssertEqual(
+            reconciliation,
+            KopiaPolicyReconciliation(
+                missingIgnorePatterns: ["/Library/Logs/**", "/Projects/tmp/**"],
+                shouldEnableIgnoreCacheDirs: true
+            )
+        )
+    }
+
     func testRepositoryStatusClassification() {
         XCTAssertEqual(
             RepositoryStatusClassifier.classify(status: 0, stdout: "{}", stderr: "", timedOut: false),

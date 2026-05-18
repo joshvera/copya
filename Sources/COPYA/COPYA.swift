@@ -12,6 +12,30 @@ import SwiftUI
 struct RuntimeConfig: Codable {
     private static let ephemeralExcludePatternsKey = "ephemeral_exclude_patterns"
     private static let legacyEphemeralExcludePatternsKey = "backup_tolerated_ephemeral_ignore_patterns"
+    private static let defaultEphemeralExcludePatterns = [
+        "/Library/Caches/**",
+        "/Library/Logs/**",
+        "/Library/Metadata/CoreSpotlight/**",
+        "/Library/Application Support/FileProvider/*/wharf/tombstone/**",
+        "/Library/DuetExpertCenter/**",
+        "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/**",
+        "/Library/Containers/*/Data/Library/Saved Application State/**",
+        "/Library/Daemon Containers/*/Data/com.apple.milod/**",
+        "/Library/Group Containers/group.com.apple.secure-control-center-preferences/**",
+        "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/**",
+        "/OrbStack/docker/images/**",
+    ]
+    private static let legacyDefaultEphemeralExcludePatterns = [
+        "/Library/Metadata/CoreSpotlight/*",
+        "/Library/Application Support/FileProvider/*/wharf/tombstone/*",
+        "/Library/DuetExpertCenter/*",
+        "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/*",
+        "/Library/Containers/*/Data/Library/Saved Application State/*",
+        "/Library/Daemon Containers/*/Data/com.apple.milod/*",
+        "/Library/Group Containers/group.com.apple.secure-control-center-preferences/*",
+        "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
+        "/OrbStack/docker/images/*",
+    ]
 
     var backup_source: String
     var backup_ignore_patterns: [String]
@@ -42,17 +66,7 @@ struct RuntimeConfig: Codable {
         return RuntimeConfig(
             backup_source: home,
             backup_ignore_patterns: [],
-            ephemeral_exclude_patterns: [
-                "/Library/Metadata/CoreSpotlight/*",
-                "/Library/Application Support/FileProvider/*/wharf/tombstone/*",
-                "/Library/DuetExpertCenter/*",
-                "/Library/Group Containers/group.com.apple.CoreSpeech/Caches/*",
-                "/Library/Containers/*/Data/Library/Saved Application State/*",
-                "/Library/Daemon Containers/*/Data/com.apple.milod/*",
-                "/Library/Group Containers/group.com.apple.secure-control-center-preferences/*",
-                "/Library/Containers/com.apple.Maps/Data/Library/Maps/ReportAProblem/*",
-                "/OrbStack/docker/images/*",
-            ],
+            ephemeral_exclude_patterns: defaultEphemeralExcludePatterns,
             protected_data_probe_paths: [
                 "\(home)/Desktop",
                 "\(home)/Documents",
@@ -106,7 +120,7 @@ struct RuntimeConfig: Codable {
             }
             return defaults
         }
-        let configData = migrateLegacyEphemeralExcludePatterns(in: data, path: path)
+        let configData = migrateRuntimeConfigData(in: data, path: path, defaults: defaults)
         do {
             let overrides = try JSONDecoder().decode(RuntimeConfigOverrides.self, from: configData)
             return overrides.apply(to: defaults).validated(fallback: defaults)
@@ -119,16 +133,28 @@ struct RuntimeConfig: Codable {
         }
     }
 
-    private static func migrateLegacyEphemeralExcludePatterns(in data: Data, path: String) -> Data {
-        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              object.keys.contains(legacyEphemeralExcludePatternsKey) else {
+    private static func migrateRuntimeConfigData(in data: Data, path: String, defaults: RuntimeConfig) -> Data {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return data
         }
 
-        if object[ephemeralExcludePatternsKey] == nil {
-            object[ephemeralExcludePatternsKey] = object[legacyEphemeralExcludePatternsKey]
+        var migrated = false
+        if object.keys.contains(legacyEphemeralExcludePatternsKey) {
+            if object[ephemeralExcludePatternsKey] == nil {
+                object[ephemeralExcludePatternsKey] = object[legacyEphemeralExcludePatternsKey]
+            }
+            object.removeValue(forKey: legacyEphemeralExcludePatternsKey)
+            migrated = true
         }
-        object.removeValue(forKey: legacyEphemeralExcludePatternsKey)
+
+        if stringArray(object[ephemeralExcludePatternsKey]) == legacyDefaultEphemeralExcludePatterns {
+            object[ephemeralExcludePatternsKey] = defaults.ephemeral_exclude_patterns
+            migrated = true
+        }
+
+        guard migrated else {
+            return data
+        }
 
         guard JSONSerialization.isValidJSONObject(object) else {
             return data
@@ -143,19 +169,29 @@ struct RuntimeConfig: Codable {
             persistMigratedConfigData(migratedData, path: path)
             return migratedData
         } catch {
-            let message = "warning: unable to migrate COPYA config at \(path) " +
-                "from \(legacyEphemeralExcludePatternsKey) to \(ephemeralExcludePatternsKey): \(error)\n"
-            fputs(message, stderr)
+            fputs("warning: unable to migrate COPYA config at \(path): \(error)\n", stderr)
             return data
         }
+    }
+
+    private static func stringArray(_ value: Any?) -> [String]? {
+        guard let values = value as? [Any] else {
+            return nil
+        }
+        var strings: [String] = []
+        for value in values {
+            guard let string = value as? String else {
+                return nil
+            }
+            strings.append(string)
+        }
+        return strings
     }
 
     private static func persistMigratedConfigData(_ data: Data, path: String) {
         let fileManager = FileManager.default
         if (try? fileManager.destinationOfSymbolicLink(atPath: path)) != nil {
-            let message = "warning: COPYA config at \(path) is a symlink; " +
-                "not rewriting legacy \(legacyEphemeralExcludePatternsKey) to \(ephemeralExcludePatternsKey)\n"
-            fputs(message, stderr)
+            fputs("warning: COPYA config at \(path) is a symlink; not rewriting migrated config\n", stderr)
             return
         }
 
@@ -321,6 +357,7 @@ enum Config {
     static let kopiaHome = runtimeRoot.map { "\($0)/home" } ?? home
     static let appSupportDir = runtimeRoot.map { "\($0)/Application Support/COPYA" } ?? "\(home)/Library/Application Support/COPYA"
     static let cacheDir = runtimeRoot.map { "\($0)/Caches/COPYA" } ?? "\(home)/Library/Caches/COPYA"
+    static let kopiaCacheDir = "\(cacheDir)/kopia"
     static let logDir = runtimeRoot.map { "\($0)/Logs/COPYA" } ?? "\(home)/Library/Logs/COPYA"
     static let explicitConfigFile = normalizedPath(ProcessInfo.processInfo.environment["COPYA_CONFIG_FILE"])
     static let configFile = explicitConfigFile ?? "\(appSupportDir)/config.json"
@@ -370,6 +407,21 @@ enum Config {
     static var backupSource: String { runtime.backup_source }
     static let backupIgnoreFile = "\(appSupportDir)/kopiaignore"
     static var backupIgnorePatterns: [String] { runtime.backup_ignore_patterns }
+    static let managedBackupIgnorePatterns: [String] = [
+        "/Library/Caches/**",
+        "/Library/Logs/**",
+        "/Library/Saved Application State/**",
+        "/OrbStack/docker/images/**",
+        "/Library/Caches/COPYA/**",
+        "/Library/Caches/kopia/**",
+        "/Library/Logs/COPYA/**",
+        "/Library/Logs/kopia/**",
+        "/Library/Application Support/COPYA/status.json",
+        "/Library/Application Support/COPYA/active-run.json",
+    ]
+    static var effectiveBackupIgnorePatterns: [String] {
+        KopiaPolicyReconciler.orderedUnique(managedBackupIgnorePatterns + backupIgnorePatterns)
+    }
     static var ephemeralExcludePatterns: [String] {
         runtime.ephemeral_exclude_patterns
     }
@@ -403,7 +455,7 @@ enum Config {
     static var limitedBackupAcknowledged: Bool { runtime.limited_backup_acknowledged }
     static var diskFreeSpaceCheckPaths: [String] {
         [
-            "\(cacheDir)/kopia",
+            kopiaCacheDir,
             "\(kopiaHome)/Library/Logs/kopia",
             rawKopiaLogFile,
             kopiaHome,
@@ -457,6 +509,8 @@ struct ConfigSummary: Codable {
     var backup_source: String
     var backup_ignore_file: String
     var backup_ignore_patterns: [String]
+    var managed_backup_ignore_patterns: [String]
+    var effective_backup_ignore_patterns: [String]
     var ephemeral_exclude_patterns: [String]
     var protected_data_probe_paths: [String]
     var cloud_materialization_roots: [String]
@@ -474,6 +528,7 @@ struct ConfigSummary: Codable {
     var password_command_configured: Bool
     var password_ref_configured: Bool
     var kopia_config_file: String?
+    var kopia_cache_directory: String
     var app_bundle_identifier: String
     var monitor_launchd_label: String
     var log_file: String
@@ -502,6 +557,8 @@ extension ConfigSummary {
         case backup_source
         case backup_ignore_file
         case backup_ignore_patterns
+        case managed_backup_ignore_patterns
+        case effective_backup_ignore_patterns
         case ephemeral_exclude_patterns
         case protected_data_probe_paths
         case cloud_materialization_roots
@@ -519,6 +576,7 @@ extension ConfigSummary {
         case password_command_configured
         case password_ref_configured
         case kopia_config_file
+        case kopia_cache_directory
         case app_bundle_identifier
         case monitor_launchd_label
         case log_file
@@ -547,6 +605,8 @@ extension ConfigSummary {
         backup_source = try container.decodeIfPresent(String.self, forKey: .backup_source) ?? Config.backupSource
         backup_ignore_file = try container.decodeIfPresent(String.self, forKey: .backup_ignore_file) ?? Config.backupIgnoreFile
         backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .backup_ignore_patterns) ?? Config.backupIgnorePatterns
+        managed_backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .managed_backup_ignore_patterns) ?? Config.managedBackupIgnorePatterns
+        effective_backup_ignore_patterns = try container.decodeIfPresent([String].self, forKey: .effective_backup_ignore_patterns) ?? Config.effectiveBackupIgnorePatterns
         ephemeral_exclude_patterns = try container.decodeIfPresent([String].self, forKey: .ephemeral_exclude_patterns) ?? Config.ephemeralExcludePatterns
         protected_data_probe_paths = try container.decodeIfPresent([String].self, forKey: .protected_data_probe_paths) ?? Config.protectedDataProbePaths
         cloud_materialization_roots = try container.decodeIfPresent([String].self, forKey: .cloud_materialization_roots) ?? Config.cloudMaterializationRoots
@@ -564,6 +624,7 @@ extension ConfigSummary {
         password_command_configured = try container.decodeIfPresent(Bool.self, forKey: .password_command_configured) ?? !Config.passwordCommand.isEmpty
         password_ref_configured = try container.decodeIfPresent(Bool.self, forKey: .password_ref_configured) ?? (Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty)
         kopia_config_file = try container.decodeIfPresent(String.self, forKey: .kopia_config_file) ?? Config.kopiaConfigFile
+        kopia_cache_directory = try container.decodeIfPresent(String.self, forKey: .kopia_cache_directory) ?? Config.kopiaCacheDir
         app_bundle_identifier = try container.decodeIfPresent(String.self, forKey: .app_bundle_identifier) ?? Config.bundleIdentifier
         monitor_launchd_label = try container.decodeIfPresent(String.self, forKey: .monitor_launchd_label) ?? Config.monitorLaunchdLabel
         log_file = try container.decodeIfPresent(String.self, forKey: .log_file) ?? Config.logFile
@@ -594,6 +655,8 @@ enum ConfigSummaryFactory {
             backup_source: Config.backupSource,
             backup_ignore_file: Config.backupIgnoreFile,
             backup_ignore_patterns: Config.backupIgnorePatterns,
+            managed_backup_ignore_patterns: Config.managedBackupIgnorePatterns,
+            effective_backup_ignore_patterns: Config.effectiveBackupIgnorePatterns,
             ephemeral_exclude_patterns: Config.ephemeralExcludePatterns,
             protected_data_probe_paths: Config.protectedDataProbePaths,
             cloud_materialization_roots: Config.cloudMaterializationRoots,
@@ -611,6 +674,7 @@ enum ConfigSummaryFactory {
             password_command_configured: !Config.passwordCommand.isEmpty,
             password_ref_configured: Config.passwordSource == "onepassword" && !Config.kopiaPasswordRef.isEmpty,
             kopia_config_file: Config.kopiaConfigFile,
+            kopia_cache_directory: Config.kopiaCacheDir,
             app_bundle_identifier: Config.bundleIdentifier,
             monitor_launchd_label: Config.monitorLaunchdLabel,
             log_file: Config.logFile,
@@ -649,8 +713,10 @@ struct DiskSpaceCheckResult: Codable {
     var checked_path: String
     var volume_key: String?
     var free_bytes: Int64?
+    var filesystem_free_bytes: Int64?
     var required_bytes: Int64
     var threshold_kind: String
+    var capacity_api: String?
     var ok: Bool
     var error: String?
 }
@@ -662,6 +728,8 @@ struct DiskHealthSnapshot: Codable {
     var required_bytes: Int64
     var failing_path: String?
     var failing_free_bytes: Int64?
+    var failing_filesystem_free_bytes: Int64?
+    var failing_capacity_api: String?
     var reason: String?
     var results: [DiskSpaceCheckResult]
 
@@ -673,6 +741,8 @@ struct DiskHealthSnapshot: Codable {
             required_bytes: 0,
             failing_path: nil,
             failing_free_bytes: nil,
+            failing_filesystem_free_bytes: nil,
+            failing_capacity_api: nil,
             reason: nil,
             results: []
         )
@@ -699,6 +769,7 @@ struct CloudCapacityVolumeEstimate: Codable {
     var volume_key: String
     var checked_path: String
     var available_bytes: Int64?
+    var filesystem_free_bytes: Int64?
     var required_bytes: Int64
     var execution_reserve_bytes: Int64
     var icloud_known_bytes: Int64
@@ -2172,6 +2243,7 @@ struct VolumeCapacitySnapshot {
     var volume_key: String
     var checked_path: String
     var available_bytes: Int64?
+    var filesystem_free_bytes: Int64?
     var capacity_api: String
     var error: String?
 }
@@ -2182,8 +2254,17 @@ enum DiskSpaceProbe {
         requiredBytes: Int64,
         thresholdKind: String
     ) -> DiskHealthSnapshot {
-        let results = paths.map { path in
+        let checkedResults = paths.map { path in
             check(path: path, requiredBytes: requiredBytes, thresholdKind: thresholdKind)
+        }
+        var seenVolumes = Set<String>()
+        let results = checkedResults.filter { result in
+            let key = result.volume_key ?? result.checked_path
+            guard !seenVolumes.contains(key) else {
+                return false
+            }
+            seenVolumes.insert(key)
+            return true
         }
         let failing = results.first { !$0.ok }
         return DiskHealthSnapshot(
@@ -2193,6 +2274,8 @@ enum DiskSpaceProbe {
             required_bytes: requiredBytes,
             failing_path: failing?.path,
             failing_free_bytes: failing?.free_bytes,
+            failing_filesystem_free_bytes: failing?.filesystem_free_bytes,
+            failing_capacity_api: failing?.capacity_api,
             reason: failing.map(diskFailureReason),
             results: results
         )
@@ -2203,15 +2286,17 @@ enum DiskSpaceProbe {
         requiredBytes: Int64,
         thresholdKind: String
     ) -> DiskSpaceCheckResult {
-        let snapshot = volumeSnapshot(for: path, preferImportantUsage: false)
+        let snapshot = volumeSnapshot(for: path, preferImportantUsage: true)
         let ok = snapshot.available_bytes.map { $0 >= requiredBytes } ?? false
         return DiskSpaceCheckResult(
             path: path,
             checked_path: snapshot.checked_path,
             volume_key: snapshot.volume_key,
             free_bytes: snapshot.available_bytes,
+            filesystem_free_bytes: snapshot.filesystem_free_bytes,
             required_bytes: requiredBytes,
             threshold_kind: thresholdKind,
+            capacity_api: snapshot.capacity_api,
             ok: ok,
             error: snapshot.error ?? (snapshot.available_bytes == nil ? "free space unavailable" : nil)
         )
@@ -2238,6 +2323,7 @@ enum DiskSpaceProbe {
                     volume_key: volumeKey,
                     checked_path: checkedPath,
                     available_bytes: importantBytes,
+                    filesystem_free_bytes: filesystemBytes,
                     capacity_api: "important_usage",
                     error: nil
                 )
@@ -2246,6 +2332,7 @@ enum DiskSpaceProbe {
                 volume_key: volumeKey,
                 checked_path: checkedPath,
                 available_bytes: filesystemBytes,
+                filesystem_free_bytes: filesystemBytes,
                 capacity_api: "filesystem_fallback",
                 error: filesystemBytes == nil ? "free space unavailable" : nil
             )
@@ -2255,6 +2342,7 @@ enum DiskSpaceProbe {
                     volume_key: resourceVolumeKey ?? checkedPath,
                     checked_path: checkedPath,
                     available_bytes: importantBytes,
+                    filesystem_free_bytes: nil,
                     capacity_api: "important_usage",
                     error: nil
                 )
@@ -2263,6 +2351,7 @@ enum DiskSpaceProbe {
                 volume_key: resourceVolumeKey ?? checkedPath,
                 checked_path: checkedPath,
                 available_bytes: nil,
+                filesystem_free_bytes: nil,
                 capacity_api: "unavailable",
                 error: error.localizedDescription
             )
@@ -2300,12 +2389,16 @@ enum DiskSpaceProbe {
 
     private static func diskFailureReason(_ result: DiskSpaceCheckResult) -> String {
         if let freeBytes = result.free_bytes {
-            return "only \(freeBytes) bytes free for \(result.path); requires \(result.required_bytes) bytes"
+            var detail = "capacity API \(result.capacity_api ?? "unknown")"
+            if let filesystemBytes = result.filesystem_free_bytes, filesystemBytes != freeBytes {
+                detail += ", filesystem free \(filesystemBytes) bytes"
+            }
+            return "only \(freeBytes) bytes available for local cache/log reserve at \(result.path) (\(detail); volume checked at \(result.checked_path)); requires \(result.required_bytes) bytes"
         }
         if let error = result.error {
-            return "unable to read free space for \(result.path): \(error)"
+            return "unable to read free space for local cache/log reserve at \(result.path): \(error)"
         }
-        return "unable to read free space for \(result.path)"
+        return "unable to read free space for local cache/log reserve at \(result.path)"
     }
 }
 
@@ -2313,6 +2406,7 @@ struct CloudCapacityVolumeAccumulator {
     var volumeKey: String
     var checkedPath: String
     var availableBytes: Int64?
+    var filesystemFreeBytes: Int64?
     var capacityAPI: String
     var error: String?
     var executionReserveBytes: Int64 = 0
@@ -2356,6 +2450,7 @@ enum CloudCapacityEstimator {
                     volume_key: accumulator.volumeKey,
                     checked_path: accumulator.checkedPath,
                     available_bytes: accumulator.availableBytes,
+                    filesystem_free_bytes: accumulator.filesystemFreeBytes,
                     required_bytes: accumulator.requiredBytes,
                     execution_reserve_bytes: accumulator.executionReserveBytes,
                     icloud_known_bytes: accumulator.iCloudKnownBytes,
@@ -2646,6 +2741,7 @@ enum CloudCapacityEstimator {
             volumeKey: volumeKey,
             checkedPath: snapshot.checked_path,
             availableBytes: snapshot.available_bytes,
+            filesystemFreeBytes: snapshot.filesystem_free_bytes,
             capacityAPI: snapshot.capacity_api,
             error: snapshot.error
         )
@@ -3351,6 +3447,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
 
         refreshNetwork(reason: "startup", shouldEvaluateSchedule: false)
         refreshSetupGate()
+        refreshIdleStartDiskHealthIfNeeded()
         if !oneShotMode {
             refreshRepositoryStatus()
         }
@@ -3871,6 +3968,17 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     environment: spec.environment,
                     timeoutSeconds: 120
                 )
+                let runtimePreparationError: String?
+                if result.status == 0 {
+                    do {
+                        try self.prepareKopiaRuntime(kopiaPath: kopiaPath, password: password)
+                        runtimePreparationError = nil
+                    } catch {
+                        runtimePreparationError = error.localizedDescription
+                    }
+                } else {
+                    runtimePreparationError = nil
+                }
                 DispatchQueue.main.async {
                     guard self.activeOperationID == operationID else {
                         return
@@ -3883,6 +3991,15 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                             state: .connected,
                             detail: "\(kind) complete"
                         )
+                        if let runtimePreparationError {
+                            self.clearOperation(id: operationID)
+                            self.recordFailure(
+                                "Repository runtime preparation failed",
+                                kind: "kopia_runtime_prepare_failed",
+                                detail: runtimePreparationError
+                            )
+                            return
+                        }
                         self.clearOperation(id: operationID)
                         self.refreshSetupGate()
                         self.updateDerivedState()
@@ -4114,6 +4231,126 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             "\(message): \(detail)",
             kind: "disk_space_exhausted",
             detail: detail
+        )
+    }
+
+    @discardableResult
+    private func refreshIdleStartDiskHealthIfNeeded() -> Bool {
+        guard activeProcess == nil,
+              activePID == nil,
+              activeMaterializationID == nil,
+              activeOperationID == nil,
+              (lastFailureKind == "disk_space_exhausted" || diskHealth.threshold_kind == "unknown") else {
+            return false
+        }
+        refreshDiskHealth(
+            requiredBytes: Config.minimumExecutionReserveBytes,
+            thresholdKind: "start"
+        )
+        updateDerivedState()
+        writeStatus()
+        return true
+    }
+
+    private func prepareKopiaRuntime(kopiaPath: String, password: String) throws {
+        var environment = childEnvironment()
+        environment["KOPIA_PASSWORD"] = password
+
+        let cachePath = try verifiedKopiaCachePath(kopiaPath: kopiaPath, environment: environment)
+        let intendedCachePath = Config.normalizedPath(Config.kopiaCacheDir) ?? Config.kopiaCacheDir
+        guard cachePath == intendedCachePath else {
+            throw preflightError(
+                "Kopia cache path mismatch: expected \(intendedCachePath), got \(cachePath)"
+            )
+        }
+
+        try reconcileKopiaBackupPolicy(kopiaPath: kopiaPath, environment: environment)
+    }
+
+    private func verifiedKopiaCachePath(
+        kopiaPath: String,
+        environment: [String: String]
+    ) throws -> String {
+        let result = try CommandRunner.run(
+            kopiaPath,
+            arguments: KopiaRepositoryCommand.cacheInfoPathArguments(configFile: Config.kopiaConfigFile),
+            environment: environment,
+            timeoutSeconds: 30
+        )
+        guard !result.timedOut else {
+            throw preflightError("Timed out verifying Kopia cache directory")
+        }
+        guard result.status == 0 else {
+            throw preflightError("Unable to verify Kopia cache directory: \(sanitizedCommandError(result.stderr))")
+        }
+        let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalized = Config.normalizedPath(path) else {
+            throw preflightError("Kopia reported an empty cache directory")
+        }
+        return normalized
+    }
+
+    private func reconcileKopiaBackupPolicy(
+        kopiaPath: String,
+        environment: [String: String]
+    ) throws {
+        let show = try CommandRunner.run(
+            kopiaPath,
+            arguments: KopiaRepositoryCommand.policyShowArguments(
+                configFile: Config.kopiaConfigFile,
+                target: Config.backupSource
+            ),
+            environment: environment,
+            timeoutSeconds: 30
+        )
+        guard !show.timedOut else {
+            throw preflightError("Timed out inspecting Kopia backup policy")
+        }
+        guard show.status == 0 else {
+            throw preflightError("Unable to inspect Kopia backup policy: \(sanitizedCommandError(show.stderr))")
+        }
+
+        let policy: KopiaPolicySnapshot
+        do {
+            policy = try JSONDecoder().decode(KopiaPolicySnapshot.self, from: Data(show.stdout.utf8))
+        } catch {
+            throw preflightError("Unable to parse Kopia backup policy JSON: \(error)")
+        }
+
+        let reconciliation = KopiaPolicyReconciler.reconcile(
+            files: policy.files,
+            managedIgnorePatterns: Config.managedBackupIgnorePatterns,
+            userIgnorePatterns: Config.backupIgnorePatterns
+        )
+        guard reconciliation.requiresUpdate else {
+            return
+        }
+
+        let set = try CommandRunner.run(
+            kopiaPath,
+            arguments: KopiaRepositoryCommand.policySetArguments(
+                configFile: Config.kopiaConfigFile,
+                target: Config.backupSource,
+                addIgnorePatterns: reconciliation.missingIgnorePatterns,
+                ignoreCacheDirs: reconciliation.shouldEnableIgnoreCacheDirs ? true : nil
+            ),
+            environment: environment,
+            timeoutSeconds: 30
+        )
+        guard !set.timedOut else {
+            throw preflightError("Timed out applying Kopia backup policy")
+        }
+        guard set.status == 0 else {
+            throw preflightError("Unable to apply Kopia backup policy: \(sanitizedCommandError(set.stderr))")
+        }
+        appendLog("kopia policy reconciled target=\"\(Config.backupSource)\" added_ignores=\(reconciliation.missingIgnorePatterns.count) ignore_cache_dirs=\(reconciliation.shouldEnableIgnoreCacheDirs)")
+    }
+
+    private func preflightError(_ message: String) -> NSError {
+        NSError(
+            domain: Config.bundleIdentifier,
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
         )
     }
 
@@ -4858,6 +5095,18 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
                     self.clearOperation(id: operationID)
                     self.updateDerivedState()
                     self.writeStatus()
+                }
+                return
+            }
+
+            do {
+                try self.prepareKopiaRuntime(kopiaPath: kopiaPath, password: password)
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.activeOperationID == operationID else {
+                        return
+                    }
+                    self.recordPreflightFailure(error.localizedDescription, operationID: operationID)
                 }
                 return
             }
@@ -6199,18 +6448,7 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             writeStatus()
         }
 
-        if activeProcess == nil
-            && activePID == nil
-            && activeMaterializationID == nil
-            && activeOperationID == nil
-            && (lastFailureKind == "disk_space_exhausted" || diskHealth.threshold_kind == "unknown") {
-            refreshDiskHealth(
-                requiredBytes: Config.minimumExecutionReserveBytes,
-                thresholdKind: "start"
-            )
-            updateDerivedState()
-            writeStatus()
-        }
+        refreshIdleStartDiskHealthIfNeeded()
 
         if let process = activeProcess {
             if !process.isRunning {
@@ -6601,7 +6839,12 @@ final class BackupMonitor: NSObject, ObservableObject, CLLocationManagerDelegate
             atPath: Config.kopiaHome,
             withIntermediateDirectories: true
         )
+        try? FileManager.default.createDirectory(
+            atPath: Config.kopiaCacheDir,
+            withIntermediateDirectories: true
+        )
         environment["HOME"] = Config.kopiaHome
+        environment["KOPIA_CACHE_DIRECTORY"] = Config.kopiaCacheDir
         environment["USER"] = Config.currentUser
         environment["LOGNAME"] = Config.currentUser
         environment["OP_BIOMETRIC_UNLOCK_ENABLED"] = "true"
@@ -7421,10 +7664,57 @@ func printEncodedJSON<T: Encodable>(_ value: T) {
     print(string)
 }
 
+func normalizedStatusForCurrentRuntime(_ persistedStatus: StatusSnapshot) -> StatusSnapshot {
+    var status = persistedStatus
+    status.app_version = Config.appVersion
+    status.config_summary = ConfigSummaryFactory.current()
+
+    let hasActiveWork = status.active_pid != nil
+        || status.active_run_id != nil
+        || status.active_operation != nil
+    if !hasActiveWork {
+        let diskHealth = DiskSpaceProbe.snapshot(
+            paths: Config.diskFreeSpaceCheckPaths,
+            requiredBytes: Config.minimumExecutionReserveBytes,
+            thresholdKind: "start"
+        )
+        status.disk_health = diskHealth
+        if status.state == BackupState.needsDiskSpace.rawValue
+            && diskHealth.ok
+            && (status.cloud_capacity_estimate?.ok ?? true) {
+            status.state = resolvedStateAfterDiskSpaceCleared(status)
+        }
+    }
+
+    return status
+}
+
+func resolvedStateAfterDiskSpaceCleared(_ status: StatusSnapshot) -> String {
+    if let setupGate = status.setup_gate, !setupGate.complete {
+        return status.state
+    }
+    switch status.network_state {
+    case "allowed":
+        return status.last_failure_at == nil ? BackupState.ready.rawValue : BackupState.failed.rawValue
+    case "denied":
+        return BackupState.paused.rawValue
+    case "missing":
+        return BackupState.disabled.rawValue
+    default:
+        return BackupState.needsPermission.rawValue
+    }
+}
+
 func printStatusJSONAndExit() -> Never {
-    if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)),
-       let string = String(data: data, encoding: .utf8) {
-        print(string)
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: Config.statusFile)) {
+        if let status = try? JSONDecoder().decode(StatusSnapshot.self, from: data) {
+            printEncodedJSON(normalizedStatusForCurrentRuntime(status))
+            exit(0)
+        }
+        if let string = String(data: data, encoding: .utf8) {
+            print(string)
+            exit(0)
+        }
         exit(0)
     }
 
